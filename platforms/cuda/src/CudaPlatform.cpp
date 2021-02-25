@@ -116,6 +116,7 @@ CudaPlatform::CudaPlatform() {
     platformProperties.push_back(CudaHostCompiler());
     platformProperties.push_back(CudaDisablePmeStream());
     platformProperties.push_back(CudaDeterministicForces());
+    platformProperties.push_back(CudaDomainDecomposition());
     setPropertyDefaultValue(CudaDeviceIndex(), "");
     setPropertyDefaultValue(CudaDeviceName(), "");
     setPropertyDefaultValue(CudaUseBlockingSync(), "true");
@@ -123,6 +124,7 @@ CudaPlatform::CudaPlatform() {
     setPropertyDefaultValue(CudaUseCpuPme(), "false");
     setPropertyDefaultValue(CudaDisablePmeStream(), "false");
     setPropertyDefaultValue(CudaDeterministicForces(), "false");
+    setPropertyDefaultValue(CudaDomainDecomposition(), "false");
 #ifdef _MSC_VER
     char* bindir = getenv("CUDA_BIN_PATH");
     string nvcc = (bindir == NULL ? "nvcc.exe" : string(bindir)+"\\nvcc.exe");
@@ -188,11 +190,14 @@ void CudaPlatform::contextCreated(ContextImpl& context, const map<string, string
             getPropertyDefaultValue(CudaDisablePmeStream()) : properties.find(CudaDisablePmeStream())->second);
     string deterministicForcesValue = (properties.find(CudaDeterministicForces()) == properties.end() ?
             getPropertyDefaultValue(CudaDeterministicForces()) : properties.find(CudaDeterministicForces())->second);
+    string domainDecompositionValue = (properties.find(CudaDomainDecomposition()) == properties.end() ?
+            getPropertyDefaultValue(CudaDomainDecomposition()) : properties.find(CudaDomainDecomposition())->second);
     transform(blockingPropValue.begin(), blockingPropValue.end(), blockingPropValue.begin(), ::tolower);
     transform(precisionPropValue.begin(), precisionPropValue.end(), precisionPropValue.begin(), ::tolower);
     transform(cpuPmePropValue.begin(), cpuPmePropValue.end(), cpuPmePropValue.begin(), ::tolower);
     transform(pmeStreamPropValue.begin(), pmeStreamPropValue.end(), pmeStreamPropValue.begin(), ::tolower);
     transform(deterministicForcesValue.begin(), deterministicForcesValue.end(), deterministicForcesValue.begin(), ::tolower);
+    transform(domainDecompositionValue.begin(), domainDecompositionValue.end(), domainDecompositionValue.begin(), ::tolower);
     vector<string> pmeKernelName;
     pmeKernelName.push_back(CalcPmeReciprocalForceKernel::Name());
     if (!supportsKernels(pmeKernelName))
@@ -204,7 +209,7 @@ void CudaPlatform::contextCreated(ContextImpl& context, const map<string, string
     char* compilerEnv = getenv("OPENMM_CUDA_COMPILER");
     bool allowRuntimeCompiler = (compilerEnv == NULL && properties.find(CudaCompiler()) == properties.end());
     context.setPlatformData(new PlatformData(&context, context.getSystem(), devicePropValue, blockingPropValue, precisionPropValue, cpuPmePropValue, compilerPropValue, tempPropValue,
-            hostCompilerPropValue, pmeStreamPropValue, deterministicForcesValue, threads, allowRuntimeCompiler, NULL));
+            hostCompilerPropValue, pmeStreamPropValue, deterministicForcesValue, domainDecompositionValue, threads, allowRuntimeCompiler, NULL));
 }
 
 void CudaPlatform::linkedContextCreated(ContextImpl& context, ContextImpl& originalContext) const {
@@ -218,10 +223,11 @@ void CudaPlatform::linkedContextCreated(ContextImpl& context, ContextImpl& origi
     string hostCompilerPropValue = platform.getPropertyValue(originalContext.getOwner(), CudaHostCompiler());
     string pmeStreamPropValue = platform.getPropertyValue(originalContext.getOwner(), CudaDisablePmeStream());
     string deterministicForcesValue = platform.getPropertyValue(originalContext.getOwner(), CudaDeterministicForces());
+    string domainDecompositionValue = platform.getPropertyValue(originalContext.getOwner(), CudaDomainDecomposition());
     int threads = reinterpret_cast<PlatformData*>(originalContext.getPlatformData())->threads.getNumThreads();
     bool allowRuntimeCompiler = reinterpret_cast<PlatformData*>(originalContext.getPlatformData())->allowRuntimeCompiler;
     context.setPlatformData(new PlatformData(&context, context.getSystem(), devicePropValue, blockingPropValue, precisionPropValue, cpuPmePropValue, compilerPropValue, tempPropValue,
-            hostCompilerPropValue, pmeStreamPropValue, deterministicForcesValue, threads, allowRuntimeCompiler, &originalContext));
+            hostCompilerPropValue, pmeStreamPropValue, deterministicForcesValue, domainDecompositionValue, threads, allowRuntimeCompiler, &originalContext));
 }
 
 void CudaPlatform::contextDestroyed(ContextImpl& context) const {
@@ -231,7 +237,7 @@ void CudaPlatform::contextDestroyed(ContextImpl& context) const {
 
 CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& system, const string& deviceIndexProperty, const string& blockingProperty, const string& precisionProperty,
             const string& cpuPmeProperty, const string& compilerProperty, const string& tempProperty, const string& hostCompilerProperty, const string& pmeStreamProperty,
-            const string& deterministicForcesProperty, int numThreads, bool allowRuntimeCompiler, ContextImpl* originalContext) :
+            const string& deterministicForcesProperty, const std::string& domainDecompositionProperty, int numThreads, bool allowRuntimeCompiler, ContextImpl* originalContext) :
                 context(context), removeCM(false), stepCount(0), computeForceCount(0), time(0.0), hasInitializedContexts(false),
                 threads(numThreads), allowRuntimeCompiler(allowRuntimeCompiler) {
     bool blocking = (blockingProperty == "true");
@@ -258,7 +264,7 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
     }
     catch (...) {
         // If an exception was thrown, do our best to clean up memory.
-        
+
         for (int i = 0; i < (int) contexts.size(); i++)
             delete contexts[i];
         throw;
@@ -281,6 +287,7 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
     useCpuPme = (cpuPmeProperty == "true" && !contexts[0]->getUseDoublePrecision());
     disablePmeStream = (pmeStreamProperty == "true");
     deterministicForces = (deterministicForcesProperty == "true");
+    domainDecomposition = (domainDecompositionProperty == "true");
     propertyValues[CudaPlatform::CudaDeviceIndex()] = deviceIndex.str();
     propertyValues[CudaPlatform::CudaDeviceName()] = deviceName.str();
     propertyValues[CudaPlatform::CudaUseBlockingSync()] = blocking ? "true" : "false";
@@ -291,10 +298,11 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
     propertyValues[CudaPlatform::CudaHostCompiler()] = hostCompilerProperty;
     propertyValues[CudaPlatform::CudaDisablePmeStream()] = disablePmeStream ? "true" : "false";
     propertyValues[CudaPlatform::CudaDeterministicForces()] = deterministicForces ? "true" : "false";
+    propertyValues[CudaPlatform::CudaDomainDecomposition()] = domainDecomposition ? "true" : "false";
     contextEnergy.resize(contexts.size());
-    
+
     // Determine whether peer-to-peer copying is supported, and enable it if so.
-    
+
     peerAccessSupported = true;
     for (int i = 1; i < contexts.size(); i++) {
         int canAccess;

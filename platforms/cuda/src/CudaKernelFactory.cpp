@@ -36,9 +36,16 @@ using namespace OpenMM;
 
 KernelImpl* CudaKernelFactory::createKernelImpl(std::string name, const Platform& platform, ContextImpl& context) const {
     CudaPlatform::PlatformData& data = *static_cast<CudaPlatform::PlatformData*>(context.getPlatformData());
+
+
     if (data.contexts.size() > 1) {
         // We are running in parallel on multiple devices, so we may want to create a parallel kernel.
-        
+
+        if(data.domainDecomposition) {
+            // If we are using domain decomposition, all of our kernels should support it
+            throw OpenMMException(std::string("Kernel '" + name + "' doesn't support domain decomposition"));
+        }
+
         if (name == CalcForcesAndEnergyKernel::Name())
             return new CudaParallelCalcForcesAndEnergyKernel(name, platform, data);
         if (name == CalcHarmonicBondForceKernel::Name())

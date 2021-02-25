@@ -33,7 +33,7 @@
 #include "openmm/common/windowsExportCommon.h"
 
 namespace OpenMM {
-    
+
 class CudaContext;
 
 /**
@@ -125,20 +125,27 @@ public:
         static const std::string key = "DeterministicForces";
         return key;
     }
+    /**
+     * This is the name of the parameter for enabling domain decomposition for multiple GPUs.
+     */
+    static const std::string& CudaDomainDecomposition() {
+        static const std::string key = "DomainDecomposition";
+        return key;
+    }
 };
 
 class OPENMM_EXPORT_COMMON CudaPlatform::PlatformData {
 public:
     PlatformData(ContextImpl* context, const System& system, const std::string& deviceIndexProperty, const std::string& blockingProperty, const std::string& precisionProperty,
             const std::string& cpuPmeProperty, const std::string& compilerProperty, const std::string& tempProperty, const std::string& hostCompilerProperty,
-            const std::string& pmeStreamProperty, const std::string& deterministicForcesProperty, int numThreads, bool allowRuntimeCompiler, ContextImpl* originalContext);
+            const std::string& pmeStreamProperty, const std::string& deterministicForcesProperty, const std::string& domainDecompositionProperty, int numThreads, bool allowRuntimeCompiler, ContextImpl* originalContext);
     ~PlatformData();
     void initializeContexts(const System& system);
     void syncContexts();
     ContextImpl* context;
     std::vector<CudaContext*> contexts;
     std::vector<double> contextEnergy;
-    bool hasInitializedContexts, removeCM, peerAccessSupported, useCpuPme, disablePmeStream, deterministicForces, allowRuntimeCompiler;
+    bool hasInitializedContexts, removeCM, peerAccessSupported, useCpuPme, disablePmeStream, deterministicForces, allowRuntimeCompiler, domainDecomposition;
     int cmMotionFrequency;
     int stepCount, computeForceCount;
     double time;
