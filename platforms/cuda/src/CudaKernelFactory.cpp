@@ -28,6 +28,7 @@
 #include "CudaKernels.h"
 #include "CudaParallelKernels.h"
 #include "CudaPlatform.h"
+#include "CudaDomainDecomposition.h"
 #include "openmm/common/CommonKernels.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/OpenMMException.h"
@@ -37,14 +38,26 @@ using namespace OpenMM;
 KernelImpl* CudaKernelFactory::createKernelImpl(std::string name, const Platform& platform, ContextImpl& context) const {
     CudaPlatform::PlatformData& data = *static_cast<CudaPlatform::PlatformData*>(context.getPlatformData());
 
+    if(data.domainDecomposition) {
+        if (name == CalcForcesAndEnergyKernel::Name())
+            return new CudaDDCalcForcesAndEnergyKernel(name, platform, data);
+        if (name == UpdateStateDataKernel::Name())
+            return new CudaDDUpdateStateDataKernel(name, platform, data);
+        if (name == ApplyConstraintsKernel::Name())
+            return new CudaDDApplyConstraintsKernel(name, platform, data);
+        if (name == VirtualSitesKernel::Name())
+            return new CudaDDVirtualSitesKernel(name, platform, data);
+        if (name == CalcNonbondedForceKernel::Name())
+            return new CudaDDCalcNonbondedForceKernel(name, platform, data, context.getSystem());
+        if (name == IntegrateVerletStepKernel::Name())
+            return new CudaDDIntegrateVerletStepKernel(name, platform, data);
+
+        // If we are using domain decomposition, all of our kernels should support it
+        throw OpenMMException(std::string("Kernel '" + name + "' doesn't support domain decomposition"));
+    }
 
     if (data.contexts.size() > 1) {
         // We are running in parallel on multiple devices, so we may want to create a parallel kernel.
-
-        if(data.domainDecomposition) {
-            // If we are using domain decomposition, all of our kernels should support it
-            throw OpenMMException(std::string("Kernel '" + name + "' doesn't support domain decomposition"));
-        }
 
         if (name == CalcForcesAndEnergyKernel::Name())
             return new CudaParallelCalcForcesAndEnergyKernel(name, platform, data);
