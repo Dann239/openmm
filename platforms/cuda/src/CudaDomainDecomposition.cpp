@@ -6,8 +6,17 @@
 using namespace OpenMM;
 using namespace std;
 
+CudaDDUtilities::CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl) : data(data), system(system) {
+    molecules = contextImpl.getMolecules();
+    moleculeInd.resize(system.getNumParticles());
+
+    for(int i = 0; i < molecules.size(); i++)
+        for(int j : molecules[i])
+            moleculeInd[j] = i;
+}
+
+
 CudaDDCalcForcesAndEnergyKernel::CudaDDCalcForcesAndEnergyKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : CalcForcesAndEnergyKernel(name, platform), data(data) {
-    //TODO
 }
 
 void CudaDDCalcForcesAndEnergyKernel::initialize(const System& system) {
@@ -24,7 +33,6 @@ double CudaDDCalcForcesAndEnergyKernel::finishComputation(ContextImpl& context, 
 
 
 CudaDDUpdateStateDataKernel::CudaDDUpdateStateDataKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : UpdateStateDataKernel(name, platform), data(data) {
-    //TODO
 }
 
 void CudaDDUpdateStateDataKernel::initialize(const System& system) {
@@ -32,11 +40,12 @@ void CudaDDUpdateStateDataKernel::initialize(const System& system) {
 }
 
 double CudaDDUpdateStateDataKernel::getTime(const ContextImpl& context) const {
-    //TODO
+    return data.contexts[0]->getTime();
 }
 
 void CudaDDUpdateStateDataKernel::setTime(ContextImpl& context, double time) {
-    //TODO
+    for (auto ctx : data.contexts)
+        ctx->setTime(time);
 }
 
 void CudaDDUpdateStateDataKernel::getPositions(ContextImpl& context, vector<Vec3>& positions) {
@@ -64,24 +73,38 @@ void CudaDDUpdateStateDataKernel::getEnergyParameterDerivatives(ContextImpl& con
 }
 
 void CudaDDUpdateStateDataKernel::getPeriodicBoxVectors(ContextImpl& context, Vec3& a, Vec3& b, Vec3& c) const {
-    //TODO
+    data.contexts[0]->getPeriodicBoxVectors(a, b, c);
 }
 
 void CudaDDUpdateStateDataKernel::setPeriodicBoxVectors(ContextImpl& context, const Vec3& a, const Vec3& b, const Vec3& c) {
-    //TODO
+    // If any particles have been wrapped to the first periodic box, we need to unwrap them
+    // to avoid changing their positions.
+
+    vector<Vec3> positions;
+    for (auto& offset : data.contexts[0]->getPosCellOffsets()) {
+        if (offset.x != 0 || offset.y != 0 || offset.z != 0) {
+            getPositions(context, positions);
+            break;
+        }
+    }
+
+    // Update the vectors.
+    for (auto ctx : data.contexts)
+        ctx->setPeriodicBoxVectors(a, b, c);
+    if (positions.size() > 0)
+        setPositions(context, positions);
 }
 
 void CudaDDUpdateStateDataKernel::createCheckpoint(ContextImpl& context, ostream& stream) {
-    //TODO
+    throw OpenMMException("Checkpoints for domain decomposition are not implemented yet.");
 }
 
 void CudaDDUpdateStateDataKernel::loadCheckpoint(ContextImpl& context, istream& stream) {
-    //TODO
+    throw OpenMMException("Checkpoints for domain decomposition are not implemented yet.");
 }
 
 
 CudaDDApplyConstraintsKernel::CudaDDApplyConstraintsKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : ApplyConstraintsKernel(name, platform), data(data) {
-    //TODO
 }
 
 void CudaDDApplyConstraintsKernel::initialize(const System& system) {
@@ -96,8 +119,8 @@ void CudaDDApplyConstraintsKernel::applyToVelocities(ContextImpl& context, doubl
     //TODO
 }
 
+
 CudaDDVirtualSitesKernel::CudaDDVirtualSitesKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : VirtualSitesKernel(name, platform), data(data) {
-    //TODO
 }
 
 void CudaDDVirtualSitesKernel::initialize(const System& system) {
@@ -110,11 +133,14 @@ void CudaDDVirtualSitesKernel::computePositions(ContextImpl& context) {
 
 
 CudaDDCalcNonbondedForceKernel::CudaDDCalcNonbondedForceKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data, const System& system) : CalcNonbondedForceKernel(name, platform), data(data) {
-    //TODO
 }
 
 void CudaDDCalcNonbondedForceKernel::initialize(const System& system, const NonbondedForce& force) {
     NonbondedMethod nonbondedMethod = CalcNonbondedForceKernel::NonbondedMethod(force.getNonbondedMethod());
+    if(nonbondedMethod == NoCutoff)
+        throw OpenMMException("Domain decomposition requires a cutoff.");
+    if(nonbondedMethod == Ewald)
+        throw OpenMMException("Ewald summation for domain decomposition is not implemented yet.");
     if(nonbondedMethod == PME || nonbondedMethod == LJPME)
         throw OpenMMException("PME for domain decomposition is not implemented yet.");
     //TODO
@@ -138,7 +164,6 @@ void CudaDDCalcNonbondedForceKernel::getLJPMEParameters(double& alpha, int& nx, 
 
 
 CudaDDIntegrateVerletStepKernel::CudaDDIntegrateVerletStepKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : IntegrateVerletStepKernel(name, platform), data(data) {
-    //TODO
 }
 
 void CudaDDIntegrateVerletStepKernel::initialize(const System& system, const VerletIntegrator& integrator) {

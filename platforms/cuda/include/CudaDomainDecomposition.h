@@ -10,6 +10,21 @@
 namespace OpenMM {
 
 /**
+ * This class implements domain decomposition features. This one is special because it's stored in
+ * PlatformData rather than CudaContext.
+ */
+class OPENMM_EXPORT_COMMON CudaDDUtilities {
+public:
+    CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl);
+
+private:
+    const System& system;
+    CudaPlatform::PlatformData& data;
+    std::vector<std::vector<int> > molecules;
+    std::vector<int> moleculeInd;
+};
+
+/**
  * This kernel is invoked at the beginning and end of force and energy computations.  It gives the
  * Platform a chance to clear buffers and do other initialization at the beginning, and to do any
  * necessary work at the end to determine the final results.

@@ -29,6 +29,7 @@
 #include "CudaPlatform.h"
 #include "CudaKernelFactory.h"
 #include "CudaKernels.h"
+#include "CudaDomainDecomposition.h"
 #include "openmm/Context.h"
 #include "openmm/System.h"
 #include "openmm/internal/ContextImpl.h"
@@ -312,11 +313,17 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
             break;
         }
     }
+
+    if(domainDecomposition)
+        ddutilities = new CudaDDUtilities(*this, system, *context);
+    else
+        ddutilities = nullptr;
 }
 
 CudaPlatform::PlatformData::~PlatformData() {
     for (int i = 0; i < (int) contexts.size(); i++)
         delete contexts[i];
+    delete ddutilities;
 }
 
 void CudaPlatform::PlatformData::initializeContexts(const System& system) {

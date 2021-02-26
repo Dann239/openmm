@@ -35,6 +35,7 @@
 namespace OpenMM {
 
 class CudaContext;
+class CudaDDUtilities;
 
 /**
  * This Platform subclass uses CUDA implementations of the OpenMM kernels.
@@ -144,6 +145,7 @@ public:
     void syncContexts();
     ContextImpl* context;
     std::vector<CudaContext*> contexts;
+    CudaDDUtilities* ddutilities;
     std::vector<double> contextEnergy;
     bool hasInitializedContexts, removeCM, peerAccessSupported, useCpuPme, disablePmeStream, deterministicForces, allowRuntimeCompiler, domainDecomposition;
     int cmMotionFrequency;
