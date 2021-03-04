@@ -1031,8 +1031,13 @@ void CudaCalcNonbondedForceKernel::initialize(const System& system, const Nonbon
 
     if ((nonbondedMethod == Ewald || nonbondedMethod == PME || nonbondedMethod == LJPME) && pmeio == NULL) {
         int numContexts = cu.getPlatformData().contexts.size();
-        int startIndex = cu.getContextIndex()*force.getNumExceptions()/numContexts;
-        int endIndex = (cu.getContextIndex()+1)*force.getNumExceptions()/numContexts;
+        int contextIndex = cu.getContextIndex();
+        if(cu.getPlatformData().domainDecomposition) {
+            contextIndex = 0;
+            numContexts = 1;
+        }
+        int startIndex = contextIndex*force.getNumExceptions()/numContexts;
+        int endIndex = (contextIndex+1)*force.getNumExceptions()/numContexts;
         int numExclusions = endIndex-startIndex;
         if (numExclusions > 0) {
             paramsDefines["HAS_EXCLUSIONS"] = "1";
@@ -1089,8 +1094,13 @@ void CudaCalcNonbondedForceKernel::initialize(const System& system, const Nonbon
     // Initialize the exceptions.
 
     int numContexts = cu.getPlatformData().contexts.size();
-    int startIndex = cu.getContextIndex()*exceptions.size()/numContexts;
-    int endIndex = (cu.getContextIndex()+1)*exceptions.size()/numContexts;
+    int contextIndex = cu.getContextIndex();
+    if(cu.getPlatformData().domainDecomposition) {
+        contextIndex = 0;
+        numContexts = 1;
+    }
+    int startIndex = contextIndex*exceptions.size()/numContexts;
+    int endIndex = (contextIndex+1)*exceptions.size()/numContexts;
     int numExceptions = endIndex-startIndex;
     if (numExceptions > 0) {
         paramsDefines["HAS_EXCEPTIONS"] = "1";
@@ -1450,8 +1460,13 @@ void CudaCalcNonbondedForceKernel::copyParametersToContext(ContextImpl& context,
             throw OpenMMException("updateParametersInContext: The set of non-excluded exceptions has changed");
     }
     int numContexts = cu.getPlatformData().contexts.size();
-    int startIndex = cu.getContextIndex()*exceptions.size()/numContexts;
-    int endIndex = (cu.getContextIndex()+1)*exceptions.size()/numContexts;
+    int contextIndex = cu.getContextIndex();
+    if(cu.getPlatformData().domainDecomposition) {
+        contextIndex = 0;
+        numContexts = 1;
+    }
+    int startIndex = contextIndex*exceptions.size()/numContexts;
+    int endIndex = (contextIndex+1)*exceptions.size()/numContexts;
     int numExceptions = endIndex-startIndex;
     
     // Record the per-particle parameters.

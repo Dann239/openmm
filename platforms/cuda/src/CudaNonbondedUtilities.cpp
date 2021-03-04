@@ -186,7 +186,12 @@ void CudaNonbondedUtilities::initialize(const System& system) {
     numAtoms = context.getNumAtoms();
     int numAtomBlocks = context.getNumAtomBlocks();
     int numContexts = context.getPlatformData().contexts.size();
-    setAtomBlockRange(context.getContextIndex()/(double) numContexts, (context.getContextIndex()+1)/(double) numContexts);
+    int contextIndex = context.getContextIndex();
+    if(context.getPlatformData().domainDecomposition) {
+        contextIndex = 0;
+        numContexts = 1;
+    }
+    setAtomBlockRange(contextIndex/(double) numContexts, (contextIndex+1)/(double) numContexts);
 
     // Build a list of tiles that contain exclusions.
 
@@ -738,8 +743,13 @@ CUfunction CudaNonbondedUtilities::createInteractionKernel(const string& source,
     int numExclusionTiles = exclusionTiles.getSize();
     defines["NUM_TILES_WITH_EXCLUSIONS"] = context.intToString(numExclusionTiles);
     int numContexts = context.getPlatformData().contexts.size();
-    int startExclusionIndex = context.getContextIndex()*numExclusionTiles/numContexts;
-    int endExclusionIndex = (context.getContextIndex()+1)*numExclusionTiles/numContexts;
+    int contextIndex = context.getContextIndex();
+    if(context.getPlatformData().domainDecomposition) {
+        contextIndex = 0;
+        numContexts = 1;
+    }
+    int startExclusionIndex = contextIndex*numExclusionTiles/numContexts;
+    int endExclusionIndex = (contextIndex+1)*numExclusionTiles/numContexts;
     defines["FIRST_EXCLUSION_TILE"] = context.intToString(startExclusionIndex);
     defines["LAST_EXCLUSION_TILE"] = context.intToString(endExclusionIndex);
     if ((localDataSize/4)%2 == 0 && !context.getUseDoublePrecision())

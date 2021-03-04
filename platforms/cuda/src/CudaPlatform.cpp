@@ -252,16 +252,34 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
     PlatformData* originalData = NULL;
     if (originalContext != NULL)
         originalData = reinterpret_cast<PlatformData*>(originalContext->getPlatformData());
+    
+    domainDecomposition = (domainDecompositionProperty == "true");
+    if(devices.size() < 2 && domainDecomposition)
+        throw OpenMMException("Domain decomposition requires at least 2 devices.");
     try {
-        for (int i = 0; i < (int) devices.size(); i++) {
-            if (devices[i].length() > 0) {
-                int deviceIndex;
-                stringstream(devices[i]) >> deviceIndex;
-                contexts.push_back(new CudaContext(system, deviceIndex, blocking, precisionProperty, compilerProperty, tempProperty, hostCompilerProperty, allowRuntimeCompiler, *this, (originalData == NULL ? NULL : originalData->contexts[i])));
+        if(domainDecomposition) {
+            ddutilities = new CudaDDUtilities(*this, system, *context);
+            const vector<System>& subsystems = ddutilities->getSubsystems();
+            for (int i = 0; i < (int) devices.size(); i++) {
+                if (devices[i].length() > 0) {
+                    int deviceIndex;
+                    stringstream(devices[i]) >> deviceIndex;
+                    contexts.push_back(new CudaContext(subsystems[i], deviceIndex, blocking, precisionProperty, compilerProperty, tempProperty, hostCompilerProperty, allowRuntimeCompiler, *this, (originalData == NULL ? NULL : originalData->contexts[i])));
+                }
             }
         }
-        if (contexts.size() == 0)
-            contexts.push_back(new CudaContext(system, -1, blocking, precisionProperty, compilerProperty, tempProperty, hostCompilerProperty, allowRuntimeCompiler, *this, (originalData == NULL ? NULL : originalData->contexts[0])));
+        else {
+            ddutilities = nullptr;
+            for (int i = 0; i < (int) devices.size(); i++) {
+                if (devices[i].length() > 0) {
+                    int deviceIndex;
+                    stringstream(devices[i]) >> deviceIndex;
+                    contexts.push_back(new CudaContext(system, deviceIndex, blocking, precisionProperty, compilerProperty, tempProperty, hostCompilerProperty, allowRuntimeCompiler, *this, (originalData == NULL ? NULL : originalData->contexts[i])));
+                }
+            }
+            if (contexts.size() == 0)
+                contexts.push_back(new CudaContext(system, -1, blocking, precisionProperty, compilerProperty, tempProperty, hostCompilerProperty, allowRuntimeCompiler, *this, (originalData == NULL ? NULL : originalData->contexts[0])));
+        }
     }
     catch (...) {
         // If an exception was thrown, do our best to clean up memory.
@@ -288,7 +306,6 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
     useCpuPme = (cpuPmeProperty == "true" && !contexts[0]->getUseDoublePrecision());
     disablePmeStream = (pmeStreamProperty == "true");
     deterministicForces = (deterministicForcesProperty == "true");
-    domainDecomposition = (domainDecompositionProperty == "true");
     propertyValues[CudaPlatform::CudaDeviceIndex()] = deviceIndex.str();
     propertyValues[CudaPlatform::CudaDeviceName()] = deviceName.str();
     propertyValues[CudaPlatform::CudaUseBlockingSync()] = blocking ? "true" : "false";
@@ -313,11 +330,6 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
             break;
         }
     }
-
-    if(domainDecomposition)
-        ddutilities = new CudaDDUtilities(*this, system, *context);
-    else
-        ddutilities = nullptr;
 }
 
 CudaPlatform::PlatformData::~PlatformData() {

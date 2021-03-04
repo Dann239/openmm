@@ -6,6 +6,7 @@
 #include "CudaPlatform.h"
 #include "CudaContext.h"
 #include "CudaKernels.h"
+#include "openmm/common/CommonKernels.h"
 
 namespace OpenMM {
 
@@ -16,12 +17,19 @@ namespace OpenMM {
 class OPENMM_EXPORT_COMMON CudaDDUtilities {
 public:
     CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl);
-
+    /**
+     * Get the subsystems that the system was decomposed into.
+     * 
+     * @return a vector of subsystems that the system was decomposed into.
+     */
+    const std::vector<System>& getSubsystems();
 private:
-    const System& system;
     CudaPlatform::PlatformData& data;
     std::vector<std::vector<int> > molecules;
     std::vector<int> moleculeInd;
+    std::vector<System> subsystems;
+public:
+    const System& system;
 };
 
 /**
@@ -66,6 +74,7 @@ public:
     double finishComputation(ContextImpl& context, bool includeForce, bool includeEnergy, int groups, bool& valid);
 private:
     CudaPlatform::PlatformData& data;
+    std::vector<CudaCalcForcesAndEnergyKernel> kernels;
 };
 
 
@@ -191,6 +200,7 @@ public:
     void applyToVelocities(ContextImpl& context, double tol);
 private:
     CudaPlatform::PlatformData& data;
+    std::vector<CudaApplyConstraintsKernel> kernels;
 };
 
 /**
@@ -198,7 +208,7 @@ private:
  */
 class CudaDDVirtualSitesKernel : public VirtualSitesKernel {
 public:
-    CudaDDVirtualSitesKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData&);
+    CudaDDVirtualSitesKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
     /**
      * Initialize the kernel.
      *
@@ -213,6 +223,7 @@ public:
     void computePositions(ContextImpl& context);
 private:
     CudaPlatform::PlatformData& data;
+    std::vector<CudaVirtualSitesKernel> kernels;
 };
 
 /**
@@ -267,6 +278,7 @@ public:
 
 private:
     CudaPlatform::PlatformData& data;
+    std::vector<CudaCalcNonbondedForceKernel> kernels;
 };
 
 /**
@@ -298,6 +310,7 @@ public:
     double computeKineticEnergy(ContextImpl& context, const VerletIntegrator& integrator);
 private:
     CudaPlatform::PlatformData& data;
+    std::vector<CommonIntegrateVerletStepKernel> kernels;
 };
 
 } // namespace OpenMM

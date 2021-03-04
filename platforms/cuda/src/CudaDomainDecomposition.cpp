@@ -6,6 +6,8 @@
 using namespace OpenMM;
 using namespace std;
 
+#define ASSERT_SYSTEMS if(&system != &data.ddutilities->system) { throw OpenMMException("Domain decomposition: System mismatch!"); }
+
 CudaDDUtilities::CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl) : data(data), system(system) {
     molecules = contextImpl.getMolecules();
     moleculeInd.resize(system.getNumParticles());
@@ -15,20 +17,34 @@ CudaDDUtilities::CudaDDUtilities(CudaPlatform::PlatformData& data, const System&
             moleculeInd[j] = i;
 }
 
+const vector<System>& CudaDDUtilities::getSubsystems() {
+    if(subsystems.size() == 0) {
+        //TODO domain decomposition
+    }
+    return subsystems;
+}
+
 
 CudaDDCalcForcesAndEnergyKernel::CudaDDCalcForcesAndEnergyKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : CalcForcesAndEnergyKernel(name, platform), data(data) {
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels.emplace_back(platform, data);
 }
 
 void CudaDDCalcForcesAndEnergyKernel::initialize(const System& system) {
-    //TODO
+    ASSERT_SYSTEMS;
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].initialize(data.ddutilities->getSubsystems()[i]);
 }
 
 void CudaDDCalcForcesAndEnergyKernel::beginComputation(ContextImpl& context, bool includeForces, bool includeEnergy, int groups) {
-    //TODO
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].beginComputation(context, includeForces, includeEnergy, groups);
 }
 
 double CudaDDCalcForcesAndEnergyKernel::finishComputation(ContextImpl& context, bool includeForces, bool includeEnergy, int groups, bool& valid) {
-    //TODO
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].finishComputation(context, includeForces, includeEnergy, groups, valid);
+    //TODO gather energy
 }
 
 
@@ -36,7 +52,7 @@ CudaDDUpdateStateDataKernel::CudaDDUpdateStateDataKernel(string name, const Plat
 }
 
 void CudaDDUpdateStateDataKernel::initialize(const System& system) {
-    //TODO
+    //TODO gather domains
 }
 
 double CudaDDUpdateStateDataKernel::getTime(const ContextImpl& context) const {
@@ -49,27 +65,27 @@ void CudaDDUpdateStateDataKernel::setTime(ContextImpl& context, double time) {
 }
 
 void CudaDDUpdateStateDataKernel::getPositions(ContextImpl& context, vector<Vec3>& positions) {
-    //TODO
+    //TODO gather domains
 }
 
 void CudaDDUpdateStateDataKernel::setPositions(ContextImpl& context, const vector<Vec3>& positions) {
-    //TODO
+    //TODO gather domains
 }
 
 void CudaDDUpdateStateDataKernel::getVelocities(ContextImpl& context, vector<Vec3>& velocities) {
-    //TODO
+    //TODO gather domains
 }
 
 void CudaDDUpdateStateDataKernel::setVelocities(ContextImpl& context, const vector<Vec3>& velocities) {
-    //TODO
+    //TODO gather domains
 }
 
 void CudaDDUpdateStateDataKernel::getForces(ContextImpl& context, vector<Vec3>& forces) {
-    //TODO
+    //TODO gather domains
 }
 
 void CudaDDUpdateStateDataKernel::getEnergyParameterDerivatives(ContextImpl& context, map<string, double>& derivs) {
-    //TODO
+    //TODO gather energy derivs
 }
 
 void CudaDDUpdateStateDataKernel::getPeriodicBoxVectors(ContextImpl& context, Vec3& a, Vec3& b, Vec3& c) const {
@@ -105,34 +121,50 @@ void CudaDDUpdateStateDataKernel::loadCheckpoint(ContextImpl& context, istream& 
 
 
 CudaDDApplyConstraintsKernel::CudaDDApplyConstraintsKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : ApplyConstraintsKernel(name, platform), data(data) {
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels.emplace_back(platform, data);
 }
 
 void CudaDDApplyConstraintsKernel::initialize(const System& system) {
-    //TODO
+    //TODO spread over domains
+    ASSERT_SYSTEMS;
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].initialize(data.ddutilities->getSubsystems()[i]);
 }
 
 void CudaDDApplyConstraintsKernel::apply(ContextImpl& context, double tol) {
-    //TODO
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].apply(context, tol);
 }
 
 void CudaDDApplyConstraintsKernel::applyToVelocities(ContextImpl& context, double tol) {
-    //TODO
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].applyToVelocities(context, tol);
 }
 
 
 CudaDDVirtualSitesKernel::CudaDDVirtualSitesKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : VirtualSitesKernel(name, platform), data(data) {
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels.emplace_back(platform, data);
 }
 
 void CudaDDVirtualSitesKernel::initialize(const System& system) {
-    //TODO
+    //TODO spread over domains
+    ASSERT_SYSTEMS;
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].initialize(data.ddutilities->getSubsystems()[i]);
 }
 
 void CudaDDVirtualSitesKernel::computePositions(ContextImpl& context) {
-    //TODO
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].computePositions(context);
 }
 
 
 CudaDDCalcNonbondedForceKernel::CudaDDCalcNonbondedForceKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data, const System& system) : CalcNonbondedForceKernel(name, platform), data(data) {
+    ASSERT_SYSTEMS;
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels.emplace_back(platform, data, data.ddutilities->getSubsystems()[i]);
 }
 
 void CudaDDCalcNonbondedForceKernel::initialize(const System& system, const NonbondedForce& force) {
@@ -143,15 +175,28 @@ void CudaDDCalcNonbondedForceKernel::initialize(const System& system, const Nonb
         throw OpenMMException("Ewald summation for domain decomposition is not implemented yet.");
     if(nonbondedMethod == PME || nonbondedMethod == LJPME)
         throw OpenMMException("PME for domain decomposition is not implemented yet.");
-    //TODO
+    //TODO spread over domains
+    ASSERT_SYSTEMS;
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].initialize(data.ddutilities->getSubsystems()[i], force);
 }
 
 double CudaDDCalcNonbondedForceKernel::execute(ContextImpl& context, bool includeForces, bool includeEnergy, bool includeDirect, bool includeReciprocal) {
-    //TODO
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].execute(context, includeForces, includeEnergy, includeDirect, includeReciprocal);
 }
 
 void CudaDDCalcNonbondedForceKernel::copyParametersToContext(ContextImpl& context, const NonbondedForce& force) {
-    //TODO
+    NonbondedMethod nonbondedMethod = CalcNonbondedForceKernel::NonbondedMethod(force.getNonbondedMethod());
+    if(nonbondedMethod == NoCutoff)
+        throw OpenMMException("Domain decomposition requires a cutoff.");
+    if(nonbondedMethod == Ewald)
+        throw OpenMMException("Ewald summation for domain decomposition is not implemented yet.");
+    if(nonbondedMethod == PME || nonbondedMethod == LJPME)
+        throw OpenMMException("PME for domain decomposition is not implemented yet.");
+    //TODO spread over domains
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].copyParametersToContext(context, force);
 }
 
 void CudaDDCalcNonbondedForceKernel::getPMEParameters(double& alpha, int& nx, int& ny, int& nz) const {
@@ -164,16 +209,22 @@ void CudaDDCalcNonbondedForceKernel::getLJPMEParameters(double& alpha, int& nx, 
 
 
 CudaDDIntegrateVerletStepKernel::CudaDDIntegrateVerletStepKernel(string name, const Platform& platform, CudaPlatform::PlatformData& data) : IntegrateVerletStepKernel(name, platform), data(data) {
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels.emplace_back(platform, data, data.ddutilities->getSubsystems()[i]);
 }
 
 void CudaDDIntegrateVerletStepKernel::initialize(const System& system, const VerletIntegrator& integrator) {
-    //TODO
+    ASSERT_SYSTEMS;
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].initialize(data.ddutilities->getSubsystems()[i], integrator);
 }
 
 void CudaDDIntegrateVerletStepKernel::execute(ContextImpl& context, const VerletIntegrator& integrator) {
-    //TODO
+    for(int i = 0; i < data.contexts.size(); i++)
+        kernels[i].execute(context, integrator);
+    //TODO halo exchange
 }
 
 double CudaDDIntegrateVerletStepKernel::computeKineticEnergy(ContextImpl& context, const VerletIntegrator& integrator) {
-    //TODO
+    //TODO gather energy
 }
