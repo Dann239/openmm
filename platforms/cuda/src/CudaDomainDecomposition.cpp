@@ -15,7 +15,8 @@ void CudaDDInterface::destroyKernels() {
 }
 
 void CudaDDInterface::prepareKernels() {
-    data.ddutilities->prepareContexts();
+    if(data.contexts.size() == 0)
+        data.ddutilities->prepareContexts();
     if (kernels.size() == data.contexts.size())
         return;
     if (kernels.size() != 0)
@@ -66,9 +67,14 @@ const vector<System>& CudaDDUtilities::getSubsystems() {
     if (positions.size() == 0)
         throw OpenMMException("Domain decomposition cannot be performed, particle positions have not been set!");
     if (subsystems.size() == 0) {
+        subsystems.resize(data.devices.size());
         //TODO domain decomposition
     }
     return subsystems;
+}
+
+void CudaDDUtilities::registerKernel(CudaDDInterface* kernel) {
+    registeredKernels.push_back(kernel);
 }
 
 void CudaDDUtilities::prepareContexts() {
@@ -76,7 +82,7 @@ void CudaDDUtilities::prepareContexts() {
         return;
     if (data.contexts.size() != 0)
         throw OpenMMException("CudaContext array in CudaPlatform::PlatformData has an invalid size!");
-    for (int i = 0; i < getSubsystems().size(); i++) {
+    for (int i = 0; i < data.devices.size(); i++) {
         if (data.devices[i].length() > 0) {
             const System& system = getSubsystems()[i];
             int deviceIndex = stoi(data.devices[i]);
@@ -122,6 +128,7 @@ double CudaDDUpdateStateDataKernel::getTime(const ContextImpl& context) const {
 }
 
 void CudaDDUpdateStateDataKernel::setTime(ContextImpl& context, double time) {
+    //TODO stash if no contexts
     for (auto ctx : data.contexts)
         ctx->setTime(time);
 }
@@ -157,6 +164,11 @@ void CudaDDUpdateStateDataKernel::getPeriodicBoxVectors(ContextImpl& context, Ve
 }
 
 void CudaDDUpdateStateDataKernel::setPeriodicBoxVectors(ContextImpl& context, const Vec3& a, const Vec3& b, const Vec3& c) {
+    if(data.contexts.size() == 0) {
+        //TODO stash
+        return;
+    }
+
     // If any particles have been wrapped to the first periodic box, we need to unwrap them
     // to avoid changing their positions.
 
