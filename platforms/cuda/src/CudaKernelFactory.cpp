@@ -38,7 +38,7 @@ using namespace OpenMM;
 KernelImpl* CudaKernelFactory::createKernelImpl(std::string name, const Platform& platform, ContextImpl& context) const {
     CudaPlatform::PlatformData& data = *static_cast<CudaPlatform::PlatformData*>(context.getPlatformData());
 
-    if(data.domainDecomposition) {
+    if (data.domainDecomposition) {
         if (name == CalcForcesAndEnergyKernel::Name())
             return new CudaDDCalcForcesAndEnergyKernel(name, platform, data);
         if (name == UpdateStateDataKernel::Name())

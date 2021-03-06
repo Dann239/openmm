@@ -242,7 +242,6 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
                 context(context), removeCM(false), stepCount(0), computeForceCount(0), time(0.0), hasInitializedContexts(false),
                 threads(numThreads), allowRuntimeCompiler(allowRuntimeCompiler) {
     bool blocking = (blockingProperty == "true");
-    vector<string> devices;
     size_t searchPos = 0, nextPos;
     while ((nextPos = deviceIndexProperty.find_first_of(", ", searchPos)) != string::npos) {
         devices.push_back(deviceIndexProperty.substr(searchPos, nextPos-searchPos));
@@ -254,19 +253,16 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
         originalData = reinterpret_cast<PlatformData*>(originalContext->getPlatformData());
     
     domainDecomposition = (domainDecompositionProperty == "true");
-    if(devices.size() < 2 && domainDecomposition)
-        throw OpenMMException("Domain decomposition requires at least 2 devices.");
     try {
-        if(domainDecomposition) {
+        if (domainDecomposition) {
+            if (devices.size() < 2)
+                throw OpenMMException("Domain decomposition requires at least 2 devices.");
+            if (originalContext != NULL)
+                throw OpenMMException("Domain decomposition is not supported for linked contexts yet.");
+
             ddutilities = new CudaDDUtilities(*this, system, *context);
-            const vector<System>& subsystems = ddutilities->getSubsystems();
-            for (int i = 0; i < (int) devices.size(); i++) {
-                if (devices[i].length() > 0) {
-                    int deviceIndex;
-                    stringstream(devices[i]) >> deviceIndex;
-                    contexts.push_back(new CudaContext(subsystems[i], deviceIndex, blocking, precisionProperty, compilerProperty, tempProperty, hostCompilerProperty, allowRuntimeCompiler, *this, (originalData == NULL ? NULL : originalData->contexts[i])));
-                }
-            }
+            // Contexts generation is postponed until after the positions are set
+            // TODO make deviceIndex, deviceName, peerAccessSupported contain correct information
         }
         else {
             ddutilities = nullptr;
@@ -303,7 +299,7 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
     cuCtxGetLimit(&printfsize, CU_LIMIT_PRINTF_FIFO_SIZE);
     cuCtxSetLimit(CU_LIMIT_PRINTF_FIFO_SIZE, 10*printfsize);
 
-    useCpuPme = (cpuPmeProperty == "true" && !contexts[0]->getUseDoublePrecision());
+    useCpuPme = (cpuPmeProperty == "true" && precisionProperty != "double");
     disablePmeStream = (pmeStreamProperty == "true");
     deterministicForces = (deterministicForcesProperty == "true");
     propertyValues[CudaPlatform::CudaDeviceIndex()] = deviceIndex.str();

@@ -1032,7 +1032,7 @@ void CudaCalcNonbondedForceKernel::initialize(const System& system, const Nonbon
     if ((nonbondedMethod == Ewald || nonbondedMethod == PME || nonbondedMethod == LJPME) && pmeio == NULL) {
         int numContexts = cu.getPlatformData().contexts.size();
         int contextIndex = cu.getContextIndex();
-        if(cu.getPlatformData().domainDecomposition) {
+        if (cu.getPlatformData().domainDecomposition) {
             contextIndex = 0;
             numContexts = 1;
         }
@@ -1095,7 +1095,7 @@ void CudaCalcNonbondedForceKernel::initialize(const System& system, const Nonbon
 
     int numContexts = cu.getPlatformData().contexts.size();
     int contextIndex = cu.getContextIndex();
-    if(cu.getPlatformData().domainDecomposition) {
+    if (cu.getPlatformData().domainDecomposition) {
         contextIndex = 0;
         numContexts = 1;
     }
@@ -1461,7 +1461,7 @@ void CudaCalcNonbondedForceKernel::copyParametersToContext(ContextImpl& context,
     }
     int numContexts = cu.getPlatformData().contexts.size();
     int contextIndex = cu.getContextIndex();
-    if(cu.getPlatformData().domainDecomposition) {
+    if (cu.getPlatformData().domainDecomposition) {
         contextIndex = 0;
         numContexts = 1;
     }

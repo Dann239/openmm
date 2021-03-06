@@ -146,6 +146,7 @@ public:
     ContextImpl* context;
     std::vector<CudaContext*> contexts;
     CudaDDUtilities* ddutilities;
+    std::vector<std::string> devices;
     std::vector<double> contextEnergy;
     bool hasInitializedContexts, removeCM, peerAccessSupported, useCpuPme, disablePmeStream, deterministicForces, allowRuntimeCompiler, domainDecomposition;
     int cmMotionFrequency;

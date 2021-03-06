@@ -187,7 +187,7 @@ void CudaNonbondedUtilities::initialize(const System& system) {
     int numAtomBlocks = context.getNumAtomBlocks();
     int numContexts = context.getPlatformData().contexts.size();
     int contextIndex = context.getContextIndex();
-    if(context.getPlatformData().domainDecomposition) {
+    if (context.getPlatformData().domainDecomposition) {
         contextIndex = 0;
         numContexts = 1;
     }
@@ -744,7 +744,7 @@ CUfunction CudaNonbondedUtilities::createInteractionKernel(const string& source,
     defines["NUM_TILES_WITH_EXCLUSIONS"] = context.intToString(numExclusionTiles);
     int numContexts = context.getPlatformData().contexts.size();
     int contextIndex = context.getContextIndex();
-    if(context.getPlatformData().domainDecomposition) {
+    if (context.getPlatformData().domainDecomposition) {
         contextIndex = 0;
         numContexts = 1;
     }

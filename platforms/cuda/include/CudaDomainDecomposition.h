@@ -11,6 +11,30 @@
 namespace OpenMM {
 
 /**
+ * This is a base class from which all domain decomposition kernels are derived.
+ * It's used as an interface with kernels by CudaDDUtilities.
+ * A kernel that implements this interface is assumed to exist for the whole duration of PlatformData
+ * existence because it's permanently registered in CudaDDUtilities on construction.
+ */
+class CudaDDInterface {
+public:
+    CudaDDInterface(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
+    /**
+     * Destroys all the kernels to prepare for contexts destruction.
+     */
+    virtual void destroyKernels();
+    /**
+     * Reconstructs all the kernels if there are none.
+     */
+    virtual void prepareKernels();
+protected:
+    std::string name;
+    const Platform& platform;
+    CudaPlatform::PlatformData& data;
+    std::vector<Kernel> kernels;
+};
+
+/**
  * This class implements domain decomposition features. This one is special because it's stored in
  * PlatformData rather than CudaContext.
  */
@@ -23,11 +47,36 @@ public:
      * @return a vector of subsystems that the system was decomposed into.
      */
     const std::vector<System>& getSubsystems();
+    /**
+     * Register a kernel via CudaDDInterface.
+     * 
+     * @param kernel reference to a kernel.
+     */
+    void registerKernel(CudaDDInterface* kernel);
+    /**
+     * Create CudaContexts if there aren't any. Particle positions need to be set in order for this to work.
+     * This is needed because in domain decomposition mode CudaContext creation is delegated to CudaDDUtilities.
+     */
+    void prepareContexts();
+    /**
+     * Destroys all CudaContexts. PlatformData holds ownership over contexts so this needn't be called on destruction.
+     */
+    void destroyContexts();
+    /**
+     * Set the positions of all particles.
+     *
+     * @param newPositions  a vector containg the particle positions
+     */
+    void setPositions(const std::vector<Vec3>& newPositions) {
+        positions = newPositions;
+    }
 private:
     CudaPlatform::PlatformData& data;
     std::vector<std::vector<int> > molecules;
     std::vector<int> moleculeInd;
+    std::vector<Vec3> positions;
     std::vector<System> subsystems;
+    std::vector<CudaDDInterface*> registeredKernels;
 public:
     const System& system;
 };
@@ -37,16 +86,21 @@ public:
  * Platform a chance to clear buffers and do other initialization at the beginning, and to do any
  * necessary work at the end to determine the final results.
  */
-class CudaDDCalcForcesAndEnergyKernel : public CalcForcesAndEnergyKernel {
+class CudaDDCalcForcesAndEnergyKernel : public CalcForcesAndEnergyKernel, public CudaDDInterface {
 public:
-    CudaDDCalcForcesAndEnergyKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
-
+    CudaDDCalcForcesAndEnergyKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
+         CalcForcesAndEnergyKernel(name, platform), CudaDDInterface(name, platform, data) {
+    }
+    CudaCalcForcesAndEnergyKernel& getKernel(int i) {
+        return kernels[i].getAs<CudaCalcForcesAndEnergyKernel>();
+    }
     /**
      * Initialize the kernel.
      *
      * @param system     the System this kernel will be applied to
      */
-    void initialize(const System& system);
+    void initialize(const System& system) {
+    }
     /**
      * This is called at the beginning of each force/energy computation, before calcForcesAndEnergy() has been called on
      * any ForceImpl.
@@ -72,19 +126,18 @@ public:
      * energy directly, <i>or</i> add it to an internal buffer so that it will be included here.
      */
     double finishComputation(ContextImpl& context, bool includeForce, bool includeEnergy, int groups, bool& valid);
-private:
-    CudaPlatform::PlatformData& data;
-    std::vector<CudaCalcForcesAndEnergyKernel> kernels;
 };
 
 
 /**
  * This kernel provides methods for setting and retrieving various state data: time, positions,
- * velocities, and forces.
+ * velocities, and forces. Unlike other DD classes, this one doesn't implement CudaDDInterface.
  */
 class CudaDDUpdateStateDataKernel : public UpdateStateDataKernel {
 public:
-    CudaDDUpdateStateDataKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
+    CudaDDUpdateStateDataKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
+        UpdateStateDataKernel(name, platform), data(data) {
+    }
     /**
      * Initialize the kernel.
      *
@@ -175,15 +228,21 @@ private:
 /**
  * This kernel modifies the positions of particles to enforce distance constraints.
  */
-class CudaDDApplyConstraintsKernel : public ApplyConstraintsKernel {
+class CudaDDApplyConstraintsKernel : public ApplyConstraintsKernel, public CudaDDInterface {
 public:
-    CudaDDApplyConstraintsKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
+    CudaDDApplyConstraintsKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
+        ApplyConstraintsKernel(name, platform), CudaDDInterface(name, platform, data) {
+    }
+    CudaApplyConstraintsKernel& getKernel(int i) {
+        return kernels[i].getAs<CudaApplyConstraintsKernel>();
+    }
     /**
      * Initialize the kernel.
      *
      * @param system     the System this kernel will be applied to
      */
-    void initialize(const System& system);
+    void initialize(const System& system) {
+    }
     /**
      * Update particle positions to enforce constraints.
      *
@@ -198,47 +257,54 @@ public:
      * @param tol        the velocity tolerance within which constraints must be satisfied.
      */
     void applyToVelocities(ContextImpl& context, double tol);
-private:
-    CudaPlatform::PlatformData& data;
-    std::vector<CudaApplyConstraintsKernel> kernels;
 };
 
 /**
  * This kernel recomputes the positions of virtual sites.
  */
-class CudaDDVirtualSitesKernel : public VirtualSitesKernel {
+class CudaDDVirtualSitesKernel : public VirtualSitesKernel, public CudaDDInterface {
 public:
-    CudaDDVirtualSitesKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
+    CudaDDVirtualSitesKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
+        VirtualSitesKernel(name, platform), CudaDDInterface(name, platform, data) {
+    }
+    CudaVirtualSitesKernel& getKernel(int i) {
+        return kernels[i].getAs<CudaVirtualSitesKernel>();
+    }
     /**
      * Initialize the kernel.
      *
      * @param system     the System this kernel will be applied to
      */
-    void initialize(const System& system);
+    void initialize(const System& system) {
+    }
     /**
      * Compute the virtual site locations.
      *
      * @param context    the context in which to execute this kernel
      */
     void computePositions(ContextImpl& context);
-private:
-    CudaPlatform::PlatformData& data;
-    std::vector<CudaVirtualSitesKernel> kernels;
 };
 
 /**
  * This kernel is invoked by NonbondedForce to calculate the forces acting on the system.
  */
-class CudaDDCalcNonbondedForceKernel : public CalcNonbondedForceKernel {
+class CudaDDCalcNonbondedForceKernel : public CalcNonbondedForceKernel, public CudaDDInterface {
 public:
-    CudaDDCalcNonbondedForceKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data, const System& system);
+    CudaDDCalcNonbondedForceKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data, const System& system) :
+        CalcNonbondedForceKernel(name, platform), CudaDDInterface(name, platform, data), storedForce(nullptr) {
+    }
+    CudaCalcNonbondedForceKernel& getKernel(int i) {
+        return kernels[i].getAs<CudaCalcNonbondedForceKernel>();
+    }
     /**
      * Initialize the kernel.
      *
      * @param system     the System this kernel will be applied to
      * @param force      the NonbondedForce this kernel will be used for
      */
-    void initialize(const System& system, const NonbondedForce& force);
+    void initialize(const System& system, const NonbondedForce& force) {
+        storedForce = &force;
+    }
     /**
      * Execute the kernel to calculate the forces and/or energy.
      *
@@ -275,25 +341,31 @@ public:
      * @param nz      the number of grid points along the Z axis
      */
     void getLJPMEParameters(double& alpha, int& nx, int& ny, int& nz) const;
-
+    void prepareKernels() override;
 private:
-    CudaPlatform::PlatformData& data;
-    std::vector<CudaCalcNonbondedForceKernel> kernels;
+    const NonbondedForce* storedForce;
 };
 
 /**
  * This kernel is invoked by VerletIntegrator to take one time step.
  */
-class CudaDDIntegrateVerletStepKernel : public IntegrateVerletStepKernel {
+class CudaDDIntegrateVerletStepKernel : public IntegrateVerletStepKernel, public CudaDDInterface {
 public:
-    CudaDDIntegrateVerletStepKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
+    CudaDDIntegrateVerletStepKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
+        IntegrateVerletStepKernel(name, platform), CudaDDInterface(name, platform, data), storedIntegrator(nullptr) {
+    }
+    CommonIntegrateVerletStepKernel& getKernel(int i) {
+        return kernels[i].getAs<CommonIntegrateVerletStepKernel>();
+    }
     /**
      * Initialize the kernel.
      *
      * @param system     the System this kernel will be applied to
      * @param integrator the VerletIntegrator this kernel will be used for
      */
-    void initialize(const System& system, const VerletIntegrator& integrator);
+    void initialize(const System& system, const VerletIntegrator& integrator) {
+        storedIntegrator = &integrator;
+    }
     /**
      * Execute the kernel.
      *
@@ -308,9 +380,9 @@ public:
      * @param integrator the VerletIntegrator this kernel is being used for
      */
     double computeKineticEnergy(ContextImpl& context, const VerletIntegrator& integrator);
+    void prepareKernels() override;
 private:
-    CudaPlatform::PlatformData& data;
-    std::vector<CommonIntegrateVerletStepKernel> kernels;
+    const VerletIntegrator* storedIntegrator;
 };
 
 } // namespace OpenMM
