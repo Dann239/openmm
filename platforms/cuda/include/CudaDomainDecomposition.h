@@ -34,11 +34,14 @@ protected:
     std::vector<Kernel> kernels;
 };
 
+class CudaDDUpdateStateDataKernel;
+
 /**
  * This class implements domain decomposition features. This one is special because it's stored in
  * PlatformData rather than CudaContext.
  */
 class OPENMM_EXPORT_COMMON CudaDDUtilities {
+    friend class CudaDDUpdateStateDataKernel;
 public:
     CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl);
     /**
@@ -54,6 +57,12 @@ public:
      */
     void registerKernel(CudaDDInterface* kernel);
     /**
+     * Register the updater kernel.
+     * 
+     * @param kernel reference to a kernel.
+     */
+    void registerUpdater(CudaDDUpdateStateDataKernel* kernel);
+    /**
      * Create CudaContexts if there aren't any. Particle positions need to be set in order for this to work.
      * This is needed because in domain decomposition mode CudaContext creation is delegated to CudaDDUtilities.
      */
@@ -62,21 +71,18 @@ public:
      * Destroys all CudaContexts. PlatformData holds ownership over contexts so this needn't be called on destruction.
      */
     void destroyContexts();
-    /**
-     * Set the positions of all particles.
-     *
-     * @param newPositions  a vector containg the particle positions
-     */
-    void setPositions(const std::vector<Vec3>& newPositions) {
-        positions = newPositions;
-    }
 private:
     CudaPlatform::PlatformData& data;
     std::vector<std::vector<int> > molecules;
     std::vector<int> moleculeInd;
-    std::vector<Vec3> positions;
     std::vector<System> subsystems;
     std::vector<CudaDDInterface*> registeredKernels;
+    CudaDDUpdateStateDataKernel* updater;
+
+    std::vector<Vec3> positions;
+    std::vector<Vec3> velocities;
+    Vec3 box[3];
+    double time;
 public:
     const System& system;
 };
@@ -143,7 +149,8 @@ public:
      *
      * @param system     the System this kernel will be applied to
      */
-    void initialize(const System& system);
+    void initialize(const System& system) {
+    }
     /**
      * Get the current time (in picoseconds).
      *

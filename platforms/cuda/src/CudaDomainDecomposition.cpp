@@ -54,7 +54,11 @@ void CudaDDInterface::prepareKernels() {
 }
 
 
-CudaDDUtilities::CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl) : data(data), system(system) {
+CudaDDUtilities::CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl) :
+    data(data), system(system), updater(nullptr), time(0) {
+
+    system.getDefaultPeriodicBoxVectors(box[0], box[1], box[2]);
+
     molecules = contextImpl.getMolecules();
     moleculeInd.resize(system.getNumParticles());
 
@@ -75,6 +79,12 @@ const vector<System>& CudaDDUtilities::getSubsystems() {
 
 void CudaDDUtilities::registerKernel(CudaDDInterface* kernel) {
     registeredKernels.push_back(kernel);
+}
+
+void CudaDDUtilities::registerUpdater(CudaDDUpdateStateDataKernel* kernel) {
+    if (updater)
+        throw OpenMMException("CudaDDUtilities: updater already registered.");
+    updater = kernel;
 }
 
 void CudaDDUtilities::prepareContexts() {
@@ -119,16 +129,12 @@ double CudaDDCalcForcesAndEnergyKernel::finishComputation(ContextImpl& context, 
 }
 
 
-void CudaDDUpdateStateDataKernel::initialize(const System& system) {
-    //TODO gather domains
-}
-
 double CudaDDUpdateStateDataKernel::getTime(const ContextImpl& context) const {
-    return data.contexts[0]->getTime();
+    return data.ddutilities->time;
 }
 
 void CudaDDUpdateStateDataKernel::setTime(ContextImpl& context, double time) {
-    //TODO stash if no contexts
+    data.ddutilities->time = time;
     for (auto ctx : data.contexts)
         ctx->setTime(time);
 }
@@ -138,7 +144,7 @@ void CudaDDUpdateStateDataKernel::getPositions(ContextImpl& context, vector<Vec3
 }
 
 void CudaDDUpdateStateDataKernel::setPositions(ContextImpl& context, const vector<Vec3>& positions) {
-    data.ddutilities->setPositions(positions);
+    data.ddutilities->positions = positions;
     data.ddutilities->prepareContexts();
     //TODO spread over domains
 }
@@ -148,6 +154,9 @@ void CudaDDUpdateStateDataKernel::getVelocities(ContextImpl& context, vector<Vec
 }
 
 void CudaDDUpdateStateDataKernel::setVelocities(ContextImpl& context, const vector<Vec3>& velocities) {
+    data.ddutilities->velocities = velocities;
+    if(data.contexts.size() == 0)
+        return;
     //TODO spread over domains
 }
 
@@ -160,23 +169,28 @@ void CudaDDUpdateStateDataKernel::getEnergyParameterDerivatives(ContextImpl& con
 }
 
 void CudaDDUpdateStateDataKernel::getPeriodicBoxVectors(ContextImpl& context, Vec3& a, Vec3& b, Vec3& c) const {
-    data.contexts[0]->getPeriodicBoxVectors(a, b, c);
+    a = data.ddutilities->box[0];
+    b = data.ddutilities->box[1];
+    c = data.ddutilities->box[2];
 }
 
 void CudaDDUpdateStateDataKernel::setPeriodicBoxVectors(ContextImpl& context, const Vec3& a, const Vec3& b, const Vec3& c) {
-    if(data.contexts.size() == 0) {
-        //TODO stash
+    data.ddutilities->box[0] = a;
+    data.ddutilities->box[1] = b;
+    data.ddutilities->box[2] = c;
+    if(data.contexts.size() == 0)
         return;
-    }
 
     // If any particles have been wrapped to the first periodic box, we need to unwrap them
     // to avoid changing their positions.
 
     vector<Vec3> positions;
-    for (auto& offset : data.contexts[0]->getPosCellOffsets()) {
-        if (offset.x != 0 || offset.y != 0 || offset.z != 0) {
-            getPositions(context, positions);
-            break;
+    for (auto ctx : data.contexts) {
+        for (auto& offset : ctx->getPosCellOffsets()) {
+            if (offset.x != 0 || offset.y != 0 || offset.z != 0) {
+                getPositions(context, positions);
+                break;
+            }
         }
     }
 
