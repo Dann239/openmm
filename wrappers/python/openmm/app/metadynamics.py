@@ -123,6 +123,7 @@ class Metadynamics(object):
         self._selfBias = np.zeros(tuple(v.gridWidth for v in reversed(variables)))
         self._totalBias = np.zeros(tuple(v.gridWidth for v in reversed(variables)))
         self._loadedBiases = {}
+        self._syncWithDisk()
         self._deltaT = temperature*(biasFactor-1)
         varNames = ['cv%d' % i for i in range(len(variables))]
         self._force = mm.CustomCVForce('table(%s)' % ', '.join(varNames))
@@ -144,9 +145,11 @@ class Metadynamics(object):
             raise ValueError('Metadynamics requires 1, 2, or 3 collective variables')
         self._force.addTabulatedFunction('table', self._table)
         freeGroups = set(range(32)) - set(force.getForceGroup() for force in system.getForces())
+        if len(freeGroups) == 0:
+            raise RuntimeError('Cannot assign a force group to the metadynamics force. '
+                               'The maximum number (32) of the force groups is already used.')
         self._force.setForceGroup(max(freeGroups))
         system.addForce(self._force)
-        self._syncWithDisk()
 
     def step(self, simulation, steps):
         """Advance the simulation by integrating a specified number of time steps.
@@ -159,6 +162,7 @@ class Metadynamics(object):
             the number of time steps to integrate
         """
         stepsToGo = steps
+        forceGroup = self._force.getForceGroup()
         while stepsToGo > 0:
             nextSteps = stepsToGo
             if simulation.currentStep % self.frequency == 0:
@@ -168,7 +172,7 @@ class Metadynamics(object):
             simulation.step(nextSteps)
             if simulation.currentStep % self.frequency == 0:
                 position = self._force.getCollectiveVariableValues(simulation.context)
-                energy = simulation.context.getState(getEnergy=True, groups={31}).getPotentialEnergy()
+                energy = simulation.context.getState(getEnergy=True, groups={forceGroup}).getPotentialEnergy()
                 height = self.height*np.exp(-energy/(unit.MOLAR_GAS_CONSTANT_R*self._deltaT))
                 self._addGaussian(position, height, simulation.context)
             if self.saveFrequency is not None and simulation.currentStep % self.saveFrequency == 0:

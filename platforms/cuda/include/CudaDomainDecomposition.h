@@ -240,8 +240,8 @@ public:
     CudaDDApplyConstraintsKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
         ApplyConstraintsKernel(name, platform), CudaDDInterface(name, platform, data) {
     }
-    CudaApplyConstraintsKernel& getKernel(int i) {
-        return kernels[i].getAs<CudaApplyConstraintsKernel>();
+    CommonApplyConstraintsKernel& getKernel(int i) {
+        return kernels[i].getAs<CommonApplyConstraintsKernel>();
     }
     /**
      * Initialize the kernel.
@@ -274,8 +274,8 @@ public:
     CudaDDVirtualSitesKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
         VirtualSitesKernel(name, platform), CudaDDInterface(name, platform, data) {
     }
-    CudaVirtualSitesKernel& getKernel(int i) {
-        return kernels[i].getAs<CudaVirtualSitesKernel>();
+    CommonVirtualSitesKernel& getKernel(int i) {
+        return kernels[i].getAs<CommonVirtualSitesKernel>();
     }
     /**
      * Initialize the kernel.

@@ -33,12 +33,12 @@ void CudaDDInterface::prepareKernels() {
         }
         // CudaDDUpdateStateData doesn't implement CudaDDInterface because reasons
         if (name == ApplyConstraintsKernel::Name()) {
-            auto newKernel = new CudaApplyConstraintsKernel(name, platform, cu);
+            auto newKernel = new CommonApplyConstraintsKernel(name, platform, cu);
             newKernel->initialize(system);
             kernel = newKernel;
         }
         if (name == VirtualSitesKernel::Name()) {
-            auto newKernel = new CudaVirtualSitesKernel(name, platform, cu);
+            auto newKernel = new CommonVirtualSitesKernel(name, platform, cu);
             newKernel->initialize(system);
             kernel = newKernel;
         }

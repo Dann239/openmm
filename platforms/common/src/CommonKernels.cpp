@@ -6,7 +6,7 @@
  * Biological Structures at Stanford, funded under the NIH Roadmap for        *
  * Medical Research, grant U54 GM072970. See https://simtk.org.               *
  *                                                                            *
- * Portions copyright (c) 2008-2020 Stanford University and the Authors.      *
+ * Portions copyright (c) 2008-2021 Stanford University and the Authors.      *
  * Authors: Peter Eastman                                                     *
  * Contributors:                                                              *
  *                                                                            *
@@ -96,6 +96,49 @@ static bool usesVariable(const Lepton::ParsedExpression& expression, const strin
 
 static pair<ExpressionTreeNode, string> makeVariable(const string& name, const string& value) {
     return make_pair(ExpressionTreeNode(new Operation::Variable(name)), value);
+}
+
+static void replaceFunctionsInExpression(map<string, CustomFunction*>& functions, ExpressionProgram& expression) {
+    for (int i = 0; i < expression.getNumOperations(); i++) {
+        if (expression.getOperation(i).getId() == Operation::CUSTOM) {
+            const Operation::Custom& op = dynamic_cast<const Operation::Custom&>(expression.getOperation(i));
+            expression.setOperation(i, new Operation::Custom(op.getName(), functions[op.getName()]->clone(), op.getDerivOrder()));
+        }
+    }
+}
+
+void CommonApplyConstraintsKernel::initialize(const System& system) {
+}
+
+void CommonApplyConstraintsKernel::apply(ContextImpl& context, double tol) {
+    cc.setAsCurrent();
+    if (!hasInitializedKernel) {
+        hasInitializedKernel = true;
+        map<string, string> defines;
+        ComputeProgram program = cc.compileProgram(CommonKernelSources::constraints, defines);
+        applyDeltasKernel = program->createKernel("applyPositionDeltas");
+        applyDeltasKernel->addArg(cc.getNumAtoms());
+        applyDeltasKernel->addArg(cc.getPosq());
+        applyDeltasKernel->addArg(cc.getIntegrationUtilities().getPosDelta());
+        if (cc.getUseMixedPrecision())
+            applyDeltasKernel->addArg(cc.getPosqCorrection());
+    }
+    IntegrationUtilities& integration = cc.getIntegrationUtilities();
+    cc.clearBuffer(integration.getPosDelta());
+    integration.applyConstraints(tol);
+    applyDeltasKernel->execute(cc.getNumAtoms());
+    integration.computeVirtualSites();
+}
+
+void CommonApplyConstraintsKernel::applyToVelocities(ContextImpl& context, double tol) {
+    cc.getIntegrationUtilities().applyVelocityConstraints(tol);
+}
+
+void CommonVirtualSitesKernel::initialize(const System& system) {
+}
+
+void CommonVirtualSitesKernel::computePositions(ContextImpl& context) {
+    cc.getIntegrationUtilities().computeVirtualSites();
 }
 
 class CommonCalcHarmonicBondForceKernel::ForceInfo : public ComputeForceInfo {
@@ -1284,86 +1327,11 @@ void CommonCalcCustomCompoundBondForceKernel::initialize(const System& system, c
         }
     }
 
-    // Now to generate the kernel.  First, it needs to calculate all distances, angles,
-    // and dihedrals the expression depends on.
+    // Generate the kernel.
 
-    map<string, vector<int> > distances;
-    map<string, vector<int> > angles;
-    map<string, vector<int> > dihedrals;
-    Lepton::ParsedExpression energyExpression = CustomCompoundBondForceImpl::prepareExpression(force, functions, distances, angles, dihedrals);
+    Lepton::ParsedExpression energyExpression = CustomCompoundBondForceImpl::prepareExpression(force, functions);
     map<string, Lepton::ParsedExpression> forceExpressions;
-    set<string> computedDeltas;
-    vector<string> atomNames, posNames;
-    for (int i = 0; i < particlesPerBond; i++) {
-        string index = cc.intToString(i+1);
-        atomNames.push_back("P"+index);
-        posNames.push_back("pos"+index);
-    }
     stringstream compute;
-    int index = 0;
-    for (auto& distance : distances) {
-        const vector<int>& atoms = distance.second;
-        string deltaName = atomNames[atoms[0]]+atomNames[atoms[1]];
-        if (computedDeltas.count(deltaName) == 0) {
-            compute<<"real4 delta"<<deltaName<<" = ccb_delta("<<posNames[atoms[0]]<<", "<<posNames[atoms[1]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName);
-        }
-        compute<<"real r_"<<deltaName<<" = SQRT(delta"<<deltaName<<".w);\n";
-        variables[distance.first] = "r_"+deltaName;
-        forceExpressions["real dEdDistance"+cc.intToString(index)+" = "] = energyExpression.differentiate(distance.first).optimize();
-        index++;
-    }
-    index = 0;
-    for (auto& angle : angles) {
-        const vector<int>& atoms = angle.second;
-        string deltaName1 = atomNames[atoms[1]]+atomNames[atoms[0]];
-        string deltaName2 = atomNames[atoms[1]]+atomNames[atoms[2]];
-        string angleName = "angle_"+atomNames[atoms[0]]+atomNames[atoms[1]]+atomNames[atoms[2]];
-        if (computedDeltas.count(deltaName1) == 0) {
-            compute<<"real4 delta"<<deltaName1<<" = ccb_delta("<<posNames[atoms[1]]<<", "<<posNames[atoms[0]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName1);
-        }
-        if (computedDeltas.count(deltaName2) == 0) {
-            compute<<"real4 delta"<<deltaName2<<" = ccb_delta("<<posNames[atoms[1]]<<", "<<posNames[atoms[2]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName2);
-        }
-        compute<<"real "<<angleName<<" = ccb_computeAngle(delta"<<deltaName1<<", delta"<<deltaName2<<");\n";
-        variables[angle.first] = angleName;
-        forceExpressions["real dEdAngle"+cc.intToString(index)+" = "] = energyExpression.differentiate(angle.first).optimize();
-        index++;
-    }
-    index = 0;
-    for (auto& dihedral : dihedrals) {
-        const vector<int>& atoms = dihedral.second;
-        string deltaName1 = atomNames[atoms[0]]+atomNames[atoms[1]];
-        string deltaName2 = atomNames[atoms[2]]+atomNames[atoms[1]];
-        string deltaName3 = atomNames[atoms[2]]+atomNames[atoms[3]];
-        string crossName1 = "cross_"+deltaName1+"_"+deltaName2;
-        string crossName2 = "cross_"+deltaName2+"_"+deltaName3;
-        string dihedralName = "dihedral_"+atomNames[atoms[0]]+atomNames[atoms[1]]+atomNames[atoms[2]]+atomNames[atoms[3]];
-        if (computedDeltas.count(deltaName1) == 0) {
-            compute<<"real4 delta"<<deltaName1<<" = ccb_delta("<<posNames[atoms[0]]<<", "<<posNames[atoms[1]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName1);
-        }
-        if (computedDeltas.count(deltaName2) == 0) {
-            compute<<"real4 delta"<<deltaName2<<" = ccb_delta("<<posNames[atoms[2]]<<", "<<posNames[atoms[1]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName2);
-        }
-        if (computedDeltas.count(deltaName3) == 0) {
-            compute<<"real4 delta"<<deltaName3<<" = ccb_delta("<<posNames[atoms[2]]<<", "<<posNames[atoms[3]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName3);
-        }
-        compute<<"real4 "<<crossName1<<" = ccb_computeCross(delta"<<deltaName1<<", delta"<<deltaName2<<");\n";
-        compute<<"real4 "<<crossName2<<" = ccb_computeCross(delta"<<deltaName2<<", delta"<<deltaName3<<");\n";
-        compute<<"real "<<dihedralName<<" = ccb_computeAngle("<<crossName1<<", "<<crossName2<<");\n";
-        compute<<dihedralName<<" *= (delta"<<deltaName1<<".x*"<<crossName2<<".x + delta"<<deltaName1<<".y*"<<crossName2<<".y + delta"<<deltaName1<<".z*"<<crossName2<<".z < 0 ? -1 : 1);\n";
-        variables[dihedral.first] = dihedralName;
-        forceExpressions["real dEdDihedral"+cc.intToString(index)+" = "] = energyExpression.differentiate(dihedral.first).optimize();
-        index++;
-    }
-
-    // Now evaluate the expressions.
-
     for (int i = 0; i < (int) params->getParameterInfos().size(); i++) {
         ComputeParameterInfo& parameter = params->getParameterInfos()[i];
         string argName = cc.getBondedUtilities().addArgument(parameter.getArray(), parameter.getType());
@@ -1376,86 +1344,27 @@ void CommonCalcCustomCompoundBondForceKernel::initialize(const System& system, c
         Lepton::ParsedExpression derivExpression = energyExpression.differentiate(paramName).optimize();
         forceExpressions[derivVariable+" += "] = derivExpression;
     }
-    compute << cc.getExpressionUtilities().createExpressions(forceExpressions, variables, functionList, functionDefinitions, "temp");
-
-    // Finally, apply forces to atoms.
-
     vector<string> forceNames;
     for (int i = 0; i < particlesPerBond; i++) {
         string istr = cc.intToString(i+1);
         string forceName = "force"+istr;
         forceNames.push_back(forceName);
         compute<<"real3 "<<forceName<<" = make_real3(0);\n";
-        compute<<"{\n";
         Lepton::ParsedExpression forceExpressionX = energyExpression.differentiate("x"+istr).optimize();
         Lepton::ParsedExpression forceExpressionY = energyExpression.differentiate("y"+istr).optimize();
         Lepton::ParsedExpression forceExpressionZ = energyExpression.differentiate("z"+istr).optimize();
-        map<string, Lepton::ParsedExpression> expressions;
         if (!isZeroExpression(forceExpressionX))
-            expressions[forceName+".x -= "] = forceExpressionX;
+            forceExpressions[forceName+".x -= "] = forceExpressionX;
         if (!isZeroExpression(forceExpressionY))
-            expressions[forceName+".y -= "] = forceExpressionY;
+            forceExpressions[forceName+".y -= "] = forceExpressionY;
         if (!isZeroExpression(forceExpressionZ))
-            expressions[forceName+".z -= "] = forceExpressionZ;
-        if (expressions.size() > 0)
-            compute<<cc.getExpressionUtilities().createExpressions(expressions, variables, functionList, functionDefinitions, "coordtemp");
-        compute<<"}\n";
+            forceExpressions[forceName+".z -= "] = forceExpressionZ;
     }
-    index = 0;
-    for (auto& distance : distances) {
-        const vector<int>& atoms = distance.second;
-        string deltaName = atomNames[atoms[0]]+atomNames[atoms[1]];
-        string value = "(dEdDistance"+cc.intToString(index)+"/r_"+deltaName+")*trimTo3(delta"+deltaName+")";
-        compute<<forceNames[atoms[0]]<<" += "<<"-"<<value<<";\n";
-        compute<<forceNames[atoms[1]]<<" += "<<value<<";\n";
-        index++;
-    }
-    index = 0;
-    for (auto& angle : angles) {
-        const vector<int>& atoms = angle.second;
-        string deltaName1 = atomNames[atoms[1]]+atomNames[atoms[0]];
-        string deltaName2 = atomNames[atoms[1]]+atomNames[atoms[2]];
-        compute<<"{\n";
-        compute<<"real3 crossProd = trimTo3(cross(delta"<<deltaName2<<", delta"<<deltaName1<<"));\n";
-        compute<<"real lengthCross = max(SQRT(dot(crossProd, crossProd)), (real) 1e-6f);\n";
-        compute<<"real3 deltaCross0 = -cross(trimTo3(delta"<<deltaName1<<"), crossProd)*dEdAngle"<<cc.intToString(index)<<"/(delta"<<deltaName1<<".w*lengthCross);\n";
-        compute<<"real3 deltaCross2 = cross(trimTo3(delta"<<deltaName2<<"), crossProd)*dEdAngle"<<cc.intToString(index)<<"/(delta"<<deltaName2<<".w*lengthCross);\n";
-        compute<<"real3 deltaCross1 = -(deltaCross0+deltaCross2);\n";
-        compute<<forceNames[atoms[0]]<<" += deltaCross0;\n";
-        compute<<forceNames[atoms[1]]<<" += deltaCross1;\n";
-        compute<<forceNames[atoms[2]]<<" += deltaCross2;\n";
-        compute<<"}\n";
-        index++;
-    }
-    index = 0;
-    for (auto& dihedral : dihedrals) {
-        const vector<int>& atoms = dihedral.second;
-        string deltaName1 = atomNames[atoms[0]]+atomNames[atoms[1]];
-        string deltaName2 = atomNames[atoms[2]]+atomNames[atoms[1]];
-        string deltaName3 = atomNames[atoms[2]]+atomNames[atoms[3]];
-        string crossName1 = "cross_"+deltaName1+"_"+deltaName2;
-        string crossName2 = "cross_"+deltaName2+"_"+deltaName3;
-        compute<<"{\n";
-        compute<<"real r = SQRT(delta"<<deltaName2<<".w);\n";
-        compute<<"real4 ff;\n";
-        compute<<"ff.x = (-dEdDihedral"<<cc.intToString(index)<<"*r)/"<<crossName1<<".w;\n";
-        compute<<"ff.y = (delta"<<deltaName1<<".x*delta"<<deltaName2<<".x + delta"<<deltaName1<<".y*delta"<<deltaName2<<".y + delta"<<deltaName1<<".z*delta"<<deltaName2<<".z)/delta"<<deltaName2<<".w;\n";
-        compute<<"ff.z = (delta"<<deltaName3<<".x*delta"<<deltaName2<<".x + delta"<<deltaName3<<".y*delta"<<deltaName2<<".y + delta"<<deltaName3<<".z*delta"<<deltaName2<<".z)/delta"<<deltaName2<<".w;\n";
-        compute<<"ff.w = (dEdDihedral"<<cc.intToString(index)<<"*r)/"<<crossName2<<".w;\n";
-        compute<<"real3 internalF0 = ff.x*trimTo3("<<crossName1<<");\n";
-        compute<<"real3 internalF3 = ff.w*trimTo3("<<crossName2<<");\n";
-        compute<<"real3 s = ff.y*internalF0 - ff.z*internalF3;\n";
-        compute<<forceNames[atoms[0]]<<" += internalF0;\n";
-        compute<<forceNames[atoms[1]]<<" += s-internalF0;\n";
-        compute<<forceNames[atoms[2]]<<" += -s-internalF3;\n";
-        compute<<forceNames[atoms[3]]<<" += internalF3;\n";
-        compute<<"}\n";
-        index++;
-    }
+    compute << cc.getExpressionUtilities().createExpressions(forceExpressions, variables, functionList, functionDefinitions, "temp", "real", force.usesPeriodicBoundaryConditions());
     cc.getBondedUtilities().addInteraction(atoms, compute.str(), force.getForceGroup());
     map<string, string> replacements;
     replacements["M_PI"] = cc.doubleToString(M_PI);
-    cc.getBondedUtilities().addPrefixCode(cc.replaceStrings(CommonKernelSources::customCompoundBond, replacements));
+    cc.getBondedUtilities().addPrefixCode(cc.replaceStrings(CommonKernelSources::pointFunctions, replacements));
 }
 
 double CommonCalcCustomCompoundBondForceKernel::execute(ContextImpl& context, bool includeForces, bool includeEnergy) {
@@ -1670,90 +1579,15 @@ void CommonCalcCustomCentroidBondForceKernel::initialize(const System& system, c
         }
     }
 
-    // Now to generate the kernel.  First, it needs to calculate all distances, angles,
-    // and dihedrals the expression depends on.
+    // Generate the kernel.
 
-    map<string, vector<int> > distances;
-    map<string, vector<int> > angles;
-    map<string, vector<int> > dihedrals;
-    Lepton::ParsedExpression energyExpression = CustomCentroidBondForceImpl::prepareExpression(force, functions, distances, angles, dihedrals);
+    Lepton::ParsedExpression energyExpression = CustomCentroidBondForceImpl::prepareExpression(force, functions);
     map<string, Lepton::ParsedExpression> forceExpressions;
-    set<string> computedDeltas;
-    vector<string> atomNames, posNames;
-    for (int i = 0; i < groupsPerBond; i++) {
-        string index = cc.intToString(i+1);
-        atomNames.push_back("P"+index);
-        posNames.push_back("pos"+index);
-    }
     stringstream compute, initParamDerivs, saveParamDerivs;
     for (int i = 0; i < groupsPerBond; i++) {
         compute<<"int group"<<(i+1)<<" = bondGroups[index+"<<(i*numBonds)<<"];\n";
         compute<<"real4 pos"<<(i+1)<<" = centerPositions[group"<<(i+1)<<"];\n";
     }
-    int index = 0;
-    for (auto& distance : distances) {
-        const vector<int>& groups = distance.second;
-        string deltaName = atomNames[groups[0]]+atomNames[groups[1]];
-        if (computedDeltas.count(deltaName) == 0) {
-            compute<<"real4 delta"<<deltaName<<" = delta("<<posNames[groups[0]]<<", "<<posNames[groups[1]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName);
-        }
-        compute<<"real r_"<<deltaName<<" = sqrt(delta"<<deltaName<<".w);\n";
-        variables[distance.first] = "r_"+deltaName;
-        forceExpressions["real dEdDistance"+cc.intToString(index)+" = "] = energyExpression.differentiate(distance.first).optimize();
-        index++;
-    }
-    index = 0;
-    for (auto& angle : angles) {
-        const vector<int>& groups = angle.second;
-        string deltaName1 = atomNames[groups[1]]+atomNames[groups[0]];
-        string deltaName2 = atomNames[groups[1]]+atomNames[groups[2]];
-        string angleName = "angle_"+atomNames[groups[0]]+atomNames[groups[1]]+atomNames[groups[2]];
-        if (computedDeltas.count(deltaName1) == 0) {
-            compute<<"real4 delta"<<deltaName1<<" = delta("<<posNames[groups[1]]<<", "<<posNames[groups[0]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName1);
-        }
-        if (computedDeltas.count(deltaName2) == 0) {
-            compute<<"real4 delta"<<deltaName2<<" = delta("<<posNames[groups[1]]<<", "<<posNames[groups[2]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName2);
-        }
-        compute<<"real "<<angleName<<" = computeAngle(delta"<<deltaName1<<", delta"<<deltaName2<<");\n";
-        variables[angle.first] = angleName;
-        forceExpressions["real dEdAngle"+cc.intToString(index)+" = "] = energyExpression.differentiate(angle.first).optimize();
-        index++;
-    }
-    index = 0;
-    for (auto& dihedral : dihedrals) {
-        const vector<int>& groups = dihedral.second;
-        string deltaName1 = atomNames[groups[0]]+atomNames[groups[1]];
-        string deltaName2 = atomNames[groups[2]]+atomNames[groups[1]];
-        string deltaName3 = atomNames[groups[2]]+atomNames[groups[3]];
-        string crossName1 = "cross_"+deltaName1+"_"+deltaName2;
-        string crossName2 = "cross_"+deltaName2+"_"+deltaName3;
-        string dihedralName = "dihedral_"+atomNames[groups[0]]+atomNames[groups[1]]+atomNames[groups[2]]+atomNames[groups[3]];
-        if (computedDeltas.count(deltaName1) == 0) {
-            compute<<"real4 delta"<<deltaName1<<" = delta("<<posNames[groups[0]]<<", "<<posNames[groups[1]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName1);
-        }
-        if (computedDeltas.count(deltaName2) == 0) {
-            compute<<"real4 delta"<<deltaName2<<" = delta("<<posNames[groups[2]]<<", "<<posNames[groups[1]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName2);
-        }
-        if (computedDeltas.count(deltaName3) == 0) {
-            compute<<"real4 delta"<<deltaName3<<" = delta("<<posNames[groups[2]]<<", "<<posNames[groups[3]]<<", "<<force.usesPeriodicBoundaryConditions()<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName3);
-        }
-        compute<<"real4 "<<crossName1<<" = computeCross(delta"<<deltaName1<<", delta"<<deltaName2<<");\n";
-        compute<<"real4 "<<crossName2<<" = computeCross(delta"<<deltaName2<<", delta"<<deltaName3<<");\n";
-        compute<<"real "<<dihedralName<<" = computeAngle("<<crossName1<<", "<<crossName2<<");\n";
-        compute<<dihedralName<<" *= (delta"<<deltaName1<<".x*"<<crossName2<<".x + delta"<<deltaName1<<".y*"<<crossName2<<".y + delta"<<deltaName1<<".z*"<<crossName2<<".z < 0 ? -1 : 1);\n";
-        variables[dihedral.first] = dihedralName;
-        forceExpressions["real dEdDihedral"+cc.intToString(index)+" = "] = energyExpression.differentiate(dihedral.first).optimize();
-        index++;
-    }
-
-    // Now evaluate the expressions.
-
     for (int i = 0; i < (int) params->getParameterInfos().size(); i++) {
         ComputeParameterInfo& parameter = params->getParameterInfos()[i];
         extraArgs<<", GLOBAL const "<<parameter.getType()<<"* RESTRICT globalParams"<<i;
@@ -1775,82 +1609,23 @@ void CommonCalcCustomCentroidBondForceKernel::initialize(const System& system, c
                 if (allParamDerivNames[index] == force.getEnergyParameterDerivativeName(i))
                     saveParamDerivs << "energyParamDerivs[GLOBAL_ID*" << numDerivs << "+" << index << "] += energyParamDeriv" << i << ";\n";
     }
-    compute << cc.getExpressionUtilities().createExpressions(forceExpressions, variables, functionList, functionDefinitions, "temp");
-
-    // Finally, apply forces to groups.
-
     vector<string> forceNames;
     for (int i = 0; i < groupsPerBond; i++) {
         string istr = cc.intToString(i+1);
         string forceName = "force"+istr;
         forceNames.push_back(forceName);
         compute<<"real3 "<<forceName<<" = make_real3(0);\n";
-        compute<<"{\n";
         Lepton::ParsedExpression forceExpressionX = energyExpression.differentiate("x"+istr).optimize();
         Lepton::ParsedExpression forceExpressionY = energyExpression.differentiate("y"+istr).optimize();
         Lepton::ParsedExpression forceExpressionZ = energyExpression.differentiate("z"+istr).optimize();
-        map<string, Lepton::ParsedExpression> expressions;
         if (!isZeroExpression(forceExpressionX))
-            expressions[forceName+".x -= "] = forceExpressionX;
+            forceExpressions[forceName+".x -= "] = forceExpressionX;
         if (!isZeroExpression(forceExpressionY))
-            expressions[forceName+".y -= "] = forceExpressionY;
+            forceExpressions[forceName+".y -= "] = forceExpressionY;
         if (!isZeroExpression(forceExpressionZ))
-            expressions[forceName+".z -= "] = forceExpressionZ;
-        if (expressions.size() > 0)
-            compute<<cc.getExpressionUtilities().createExpressions(expressions, variables, functionList, functionDefinitions, "coordtemp");
-        compute<<"}\n";
+            forceExpressions[forceName+".z -= "] = forceExpressionZ;
     }
-    index = 0;
-    for (auto& distance : distances) {
-        const vector<int>& groups = distance.second;
-        string deltaName = atomNames[groups[0]]+atomNames[groups[1]];
-        string value = "(dEdDistance"+cc.intToString(index)+"/r_"+deltaName+")*trimTo3(delta"+deltaName+")";
-        compute<<forceNames[groups[0]]<<" += "<<"-"<<value<<";\n";
-        compute<<forceNames[groups[1]]<<" += "<<value<<";\n";
-        index++;
-    }
-    index = 0;
-    for (auto& angle : angles) {
-        const vector<int>& groups = angle.second;
-        string deltaName1 = atomNames[groups[1]]+atomNames[groups[0]];
-        string deltaName2 = atomNames[groups[1]]+atomNames[groups[2]];
-        compute<<"{\n";
-        compute<<"real3 crossProd = trimTo3(cross(delta"<<deltaName2<<", delta"<<deltaName1<<"));\n";
-        compute<<"real lengthCross = max(SQRT(dot(crossProd, crossProd)), (real) 1e-6f);\n";
-        compute<<"real3 deltaCross0 = -cross(trimTo3(delta"<<deltaName1<<"), crossProd)*dEdAngle"<<cc.intToString(index)<<"/(delta"<<deltaName1<<".w*lengthCross);\n";
-        compute<<"real3 deltaCross2 = cross(trimTo3(delta"<<deltaName2<<"), crossProd)*dEdAngle"<<cc.intToString(index)<<"/(delta"<<deltaName2<<".w*lengthCross);\n";
-        compute<<"real3 deltaCross1 = -(deltaCross0+deltaCross2);\n";
-        compute<<forceNames[groups[0]]<<" += deltaCross0;\n";
-        compute<<forceNames[groups[1]]<<" += deltaCross1;\n";
-        compute<<forceNames[groups[2]]<<" += deltaCross2;\n";
-        compute<<"}\n";
-        index++;
-    }
-    index = 0;
-    for (auto& dihedral : dihedrals) {
-        const vector<int>& groups = dihedral.second;
-        string deltaName1 = atomNames[groups[0]]+atomNames[groups[1]];
-        string deltaName2 = atomNames[groups[2]]+atomNames[groups[1]];
-        string deltaName3 = atomNames[groups[2]]+atomNames[groups[3]];
-        string crossName1 = "cross_"+deltaName1+"_"+deltaName2;
-        string crossName2 = "cross_"+deltaName2+"_"+deltaName3;
-        compute<<"{\n";
-        compute<<"real r = sqrt(delta"<<deltaName2<<".w);\n";
-        compute<<"real4 ff;\n";
-        compute<<"ff.x = (-dEdDihedral"<<cc.intToString(index)<<"*r)/"<<crossName1<<".w;\n";
-        compute<<"ff.y = (delta"<<deltaName1<<".x*delta"<<deltaName2<<".x + delta"<<deltaName1<<".y*delta"<<deltaName2<<".y + delta"<<deltaName1<<".z*delta"<<deltaName2<<".z)/delta"<<deltaName2<<".w;\n";
-        compute<<"ff.z = (delta"<<deltaName3<<".x*delta"<<deltaName2<<".x + delta"<<deltaName3<<".y*delta"<<deltaName2<<".y + delta"<<deltaName3<<".z*delta"<<deltaName2<<".z)/delta"<<deltaName2<<".w;\n";
-        compute<<"ff.w = (dEdDihedral"<<cc.intToString(index)<<"*r)/"<<crossName2<<".w;\n";
-        compute<<"real3 internalF0 = ff.x*trimTo3("<<crossName1<<");\n";
-        compute<<"real3 internalF3 = ff.w*trimTo3("<<crossName2<<");\n";
-        compute<<"real3 s = ff.y*internalF0 - ff.z*internalF3;\n";
-        compute<<forceNames[groups[0]]<<" += internalF0;\n";
-        compute<<forceNames[groups[1]]<<" += s-internalF0;\n";
-        compute<<forceNames[groups[2]]<<" += -s-internalF3;\n";
-        compute<<forceNames[groups[3]]<<" += internalF3;\n";
-        compute<<"}\n";
-        index++;
-    }
+    compute << cc.getExpressionUtilities().createExpressions(forceExpressions, variables, functionList, functionDefinitions, "temp", "real", force.usesPeriodicBoundaryConditions());
     
     // Save the forces to global memory.
     
@@ -1868,7 +1643,7 @@ void CommonCalcCustomCentroidBondForceKernel::initialize(const System& system, c
     replacements["COMPUTE_FORCE"] = compute.str();
     replacements["INIT_PARAM_DERIVS"] = initParamDerivs.str();
     replacements["SAVE_PARAM_DERIVS"] = saveParamDerivs.str();
-    ComputeProgram program = cc.compileProgram(cc.replaceStrings(CommonKernelSources::customCentroidBond, replacements));
+    ComputeProgram program = cc.compileProgram(cc.replaceStrings(CommonKernelSources::pointFunctions+CommonKernelSources::customCentroidBond, replacements));
     computeCentersKernel = program->createKernel("computeGroupCenters");
     computeCentersKernel->addArg(numGroups);
     computeCentersKernel->addArg(cc.getPosq());
@@ -4564,167 +4339,33 @@ void CommonCalcCustomManyParticleForceKernel::initialize(const System& system, c
         neighbors.initialize<int>(cc, maxNeighborPairs, "customManyParticleNeighbors");
     }
 
-    // Now to generate the kernel.  First, it needs to calculate all distances, angles,
-    // and dihedrals the expression depends on.
+    // Generate the kernel.
 
-    map<string, vector<int> > distances;
-    map<string, vector<int> > angles;
-    map<string, vector<int> > dihedrals;
-    Lepton::ParsedExpression energyExpression = CustomManyParticleForceImpl::prepareExpression(force, functions, distances, angles, dihedrals);
+    Lepton::ParsedExpression energyExpression = CustomManyParticleForceImpl::prepareExpression(force, functions);
     map<string, Lepton::ParsedExpression> forceExpressions;
-    set<string> computedDeltas;
-    vector<string> atomNames, posNames;
-    for (int i = 0; i < particlesPerSet; i++) {
-        string index = cc.intToString(i+1);
-        atomNames.push_back("P"+index);
-        posNames.push_back("pos"+index);
-    }
     stringstream compute;
-    int index = 0;
-    for (auto& distance : distances) {
-        const vector<int>& atoms = distance.second;
-        string deltaName = atomNames[atoms[0]]+atomNames[atoms[1]];
-        if (computedDeltas.count(deltaName) == 0) {
-            compute<<"real4 delta"<<deltaName<<" = delta("<<posNames[atoms[0]]<<", "<<posNames[atoms[1]]<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName);
-        }
-        compute<<"real r_"<<deltaName<<" = sqrt(delta"<<deltaName<<".w);\n";
-        variables.push_back(makeVariable(distance.first, "r_"+deltaName));
-        forceExpressions["real dEdDistance"+cc.intToString(index)+" = "] = energyExpression.differentiate(distance.first).optimize();
-        index++;
-    }
-    index = 0;
-    for (auto& angle : angles) {
-        const vector<int>& atoms = angle.second;
-        string deltaName1 = atomNames[atoms[1]]+atomNames[atoms[0]];
-        string deltaName2 = atomNames[atoms[1]]+atomNames[atoms[2]];
-        string angleName = "angle_"+atomNames[atoms[0]]+atomNames[atoms[1]]+atomNames[atoms[2]];
-        if (computedDeltas.count(deltaName1) == 0) {
-            compute<<"real4 delta"<<deltaName1<<" = delta("<<posNames[atoms[1]]<<", "<<posNames[atoms[0]]<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName1);
-        }
-        if (computedDeltas.count(deltaName2) == 0) {
-            compute<<"real4 delta"<<deltaName2<<" = delta("<<posNames[atoms[1]]<<", "<<posNames[atoms[2]]<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName2);
-        }
-        compute<<"real "<<angleName<<" = computeAngle(delta"<<deltaName1<<", delta"<<deltaName2<<");\n";
-        variables.push_back(makeVariable(angle.first, angleName));
-        forceExpressions["real dEdAngle"+cc.intToString(index)+" = "] = energyExpression.differentiate(angle.first).optimize();
-        index++;
-    }
-    index = 0;
-    for (auto& dihedral : dihedrals) {
-        const vector<int>& atoms = dihedral.second;
-        string deltaName1 = atomNames[atoms[0]]+atomNames[atoms[1]];
-        string deltaName2 = atomNames[atoms[2]]+atomNames[atoms[1]];
-        string deltaName3 = atomNames[atoms[2]]+atomNames[atoms[3]];
-        string crossName1 = "cross_"+deltaName1+"_"+deltaName2;
-        string crossName2 = "cross_"+deltaName2+"_"+deltaName3;
-        string dihedralName = "dihedral_"+atomNames[atoms[0]]+atomNames[atoms[1]]+atomNames[atoms[2]]+atomNames[atoms[3]];
-        if (computedDeltas.count(deltaName1) == 0) {
-            compute<<"real4 delta"<<deltaName1<<" = delta("<<posNames[atoms[0]]<<", "<<posNames[atoms[1]]<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName1);
-        }
-        if (computedDeltas.count(deltaName2) == 0) {
-            compute<<"real4 delta"<<deltaName2<<" = delta("<<posNames[atoms[2]]<<", "<<posNames[atoms[1]]<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName2);
-        }
-        if (computedDeltas.count(deltaName3) == 0) {
-            compute<<"real4 delta"<<deltaName3<<" = delta("<<posNames[atoms[2]]<<", "<<posNames[atoms[3]]<<", periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);\n";
-            computedDeltas.insert(deltaName3);
-        }
-        compute<<"real4 "<<crossName1<<" = computeCross(delta"<<deltaName1<<", delta"<<deltaName2<<");\n";
-        compute<<"real4 "<<crossName2<<" = computeCross(delta"<<deltaName2<<", delta"<<deltaName3<<");\n";
-        compute<<"real "<<dihedralName<<" = computeAngle("<<crossName1<<", "<<crossName2<<");\n";
-        compute<<dihedralName<<" *= (delta"<<deltaName1<<".x*"<<crossName2<<".x + delta"<<deltaName1<<".y*"<<crossName2<<".y + delta"<<deltaName1<<".z*"<<crossName2<<".z < 0 ? -1 : 1);\n";
-        variables.push_back(makeVariable(dihedral.first, dihedralName));
-        forceExpressions["real dEdDihedral"+cc.intToString(index)+" = "] = energyExpression.differentiate(dihedral.first).optimize();
-        index++;
-    }
-
-    // Now evaluate the expressions.
-
     for (int i = 0; i < (int) params->getParameterInfos().size(); i++) {
         ComputeParameterInfo& parameter = params->getParameterInfos()[i];
         compute<<parameter.getType()<<" params"<<(i+1)<<" = global_params"<<(i+1)<<"[index];\n";
     }
     forceExpressions["energy += "] = energyExpression;
-    compute << cc.getExpressionUtilities().createExpressions(forceExpressions, variables, functionList, functionDefinitions, "temp");
-
-    // Apply forces to atoms.
-
     vector<string> forceNames;
     for (int i = 0; i < particlesPerSet; i++) {
         string istr = cc.intToString(i+1);
         string forceName = "force"+istr;
         forceNames.push_back(forceName);
         compute<<"real3 "<<forceName<<" = make_real3(0);\n";
-        compute<<"{\n";
         Lepton::ParsedExpression forceExpressionX = energyExpression.differentiate("x"+istr).optimize();
         Lepton::ParsedExpression forceExpressionY = energyExpression.differentiate("y"+istr).optimize();
         Lepton::ParsedExpression forceExpressionZ = energyExpression.differentiate("z"+istr).optimize();
-        map<string, Lepton::ParsedExpression> expressions;
         if (!isZeroExpression(forceExpressionX))
-            expressions[forceName+".x -= "] = forceExpressionX;
+            forceExpressions[forceName+".x -= "] = forceExpressionX;
         if (!isZeroExpression(forceExpressionY))
-            expressions[forceName+".y -= "] = forceExpressionY;
+            forceExpressions[forceName+".y -= "] = forceExpressionY;
         if (!isZeroExpression(forceExpressionZ))
-            expressions[forceName+".z -= "] = forceExpressionZ;
-        if (expressions.size() > 0)
-            compute<<cc.getExpressionUtilities().createExpressions(expressions, variables, functionList, functionDefinitions, "coordtemp");
-        compute<<"}\n";
+            forceExpressions[forceName+".z -= "] = forceExpressionZ;
     }
-    index = 0;
-    for (auto& distance : distances) {
-        const vector<int>& atoms = distance.second;
-        string deltaName = atomNames[atoms[0]]+atomNames[atoms[1]];
-        string value = "(dEdDistance"+cc.intToString(index)+"/r_"+deltaName+")*trimTo3(delta"+deltaName+")";
-        compute<<forceNames[atoms[0]]<<" += "<<"-"<<value<<";\n";
-        compute<<forceNames[atoms[1]]<<" += "<<value<<";\n";
-        index++;
-    }
-    index = 0;
-    for (auto& angle : angles) {
-        const vector<int>& atoms = angle.second;
-        string deltaName1 = atomNames[atoms[1]]+atomNames[atoms[0]];
-        string deltaName2 = atomNames[atoms[1]]+atomNames[atoms[2]];
-        compute<<"{\n";
-        compute<<"real3 crossProd = trimTo3(cross(delta"<<deltaName2<<", delta"<<deltaName1<<"));\n";
-        compute<<"real lengthCross = max(SQRT(dot(crossProd, crossProd)), (real) 1e-6f);\n";
-        compute<<"real3 deltaCross0 = -cross(trimTo3(delta"<<deltaName1<<"), crossProd)*dEdAngle"<<cc.intToString(index)<<"/(delta"<<deltaName1<<".w*lengthCross);\n";
-        compute<<"real3 deltaCross2 = cross(trimTo3(delta"<<deltaName2<<"), crossProd)*dEdAngle"<<cc.intToString(index)<<"/(delta"<<deltaName2<<".w*lengthCross);\n";
-        compute<<"real3 deltaCross1 = -(deltaCross0+deltaCross2);\n";
-        compute<<forceNames[atoms[0]]<<" += deltaCross0;\n";
-        compute<<forceNames[atoms[1]]<<" += deltaCross1;\n";
-        compute<<forceNames[atoms[2]]<<" += deltaCross2;\n";
-        compute<<"}\n";
-        index++;
-    }
-    index = 0;
-    for (auto& dihedral : dihedrals) {
-        const vector<int>& atoms = dihedral.second;
-        string deltaName1 = atomNames[atoms[0]]+atomNames[atoms[1]];
-        string deltaName2 = atomNames[atoms[2]]+atomNames[atoms[1]];
-        string deltaName3 = atomNames[atoms[2]]+atomNames[atoms[3]];
-        string crossName1 = "cross_"+deltaName1+"_"+deltaName2;
-        string crossName2 = "cross_"+deltaName2+"_"+deltaName3;
-        compute<<"{\n";
-        compute<<"real r = sqrt(delta"<<deltaName2<<".w);\n";
-        compute<<"real4 ff;\n";
-        compute<<"ff.x = (-dEdDihedral"<<cc.intToString(index)<<"*r)/"<<crossName1<<".w;\n";
-        compute<<"ff.y = (delta"<<deltaName1<<".x*delta"<<deltaName2<<".x + delta"<<deltaName1<<".y*delta"<<deltaName2<<".y + delta"<<deltaName1<<".z*delta"<<deltaName2<<".z)/delta"<<deltaName2<<".w;\n";
-        compute<<"ff.z = (delta"<<deltaName3<<".x*delta"<<deltaName2<<".x + delta"<<deltaName3<<".y*delta"<<deltaName2<<".y + delta"<<deltaName3<<".z*delta"<<deltaName2<<".z)/delta"<<deltaName2<<".w;\n";
-        compute<<"ff.w = (dEdDihedral"<<cc.intToString(index)<<"*r)/"<<crossName2<<".w;\n";
-        compute<<"real3 internalF0 = ff.x*trimTo3("<<crossName1<<");\n";
-        compute<<"real3 internalF3 = ff.w*trimTo3("<<crossName2<<");\n";
-        compute<<"real3 s = ff.y*internalF0 - ff.z*internalF3;\n";
-        compute<<forceNames[atoms[0]]<<" += internalF0;\n";
-        compute<<forceNames[atoms[1]]<<" += s-internalF0;\n";
-        compute<<forceNames[atoms[2]]<<" += -s-internalF3;\n";
-        compute<<forceNames[atoms[3]]<<" += internalF3;\n";
-        compute<<"}\n";
-        index++;
-    }
+    compute << cc.getExpressionUtilities().createExpressions(forceExpressions, variables, functionList, functionDefinitions, "temp", "real", force.usesPeriodicBoundaryConditions());
     
     // Store forces to global memory.
     
@@ -4859,7 +4500,7 @@ void CommonCalcCustomManyParticleForceKernel::initialize(const System& system, c
     defines["TILE_SIZE"] = cc.intToString(32);
     defines["NUM_BLOCKS"] = cc.intToString(numAtomBlocks);
     defines["FIND_NEIGHBORS_WORKGROUP_SIZE"] = cc.intToString(findNeighborsWorkgroupSize);
-    ComputeProgram program = cc.compileProgram(cc.replaceStrings(CommonKernelSources::customManyParticle, replacements), defines);
+    ComputeProgram program = cc.compileProgram(cc.replaceStrings(CommonKernelSources::pointFunctions+CommonKernelSources::customManyParticle, replacements), defines);
     forceKernel = program->createKernel("computeInteraction");
     blockBoundsKernel = program->createKernel("findBlockBounds");
     neighborsKernel = program->createKernel("findNeighbors");
@@ -5393,6 +5034,225 @@ void CommonCalcGayBerneForceKernel::sortAtoms() {
     startIndexVec[numRealParticles] = index;
     exclusions.upload(exclusionVec);
     exclusionStartIndex.upload(startIndexVec);
+}
+
+class CommonCalcCustomCVForceKernel::ForceInfo : public ComputeForceInfo {
+public:
+    ForceInfo(ComputeForceInfo& force) : force(force) {
+    }
+    bool areParticlesIdentical(int particle1, int particle2) {
+        return force.areParticlesIdentical(particle1, particle2);
+    }
+    int getNumParticleGroups() {
+        return force.getNumParticleGroups();
+    }
+    void getParticlesInGroup(int index, std::vector<int>& particles) {
+        force.getParticlesInGroup(index, particles);
+    }
+    bool areGroupsIdentical(int group1, int group2) {
+        return force.areGroupsIdentical(group1, group2);
+    }
+private:
+    ComputeForceInfo& force;
+};
+
+class CommonCalcCustomCVForceKernel::ReorderListener : public ComputeContext::ReorderListener {
+public:
+    ReorderListener(ComputeContext& cc, ArrayInterface& invAtomOrder) : cc(cc), invAtomOrder(invAtomOrder) {
+    }
+    void execute() {
+        vector<int> invOrder(cc.getPaddedNumAtoms());
+        const vector<int>& order = cc.getAtomIndex();
+        for (int i = 0; i < order.size(); i++)
+            invOrder[order[i]] = i;
+        invAtomOrder.upload(invOrder);
+    }
+private:
+    ComputeContext& cc;
+    ArrayInterface& invAtomOrder;
+};
+
+void CommonCalcCustomCVForceKernel::initialize(const System& system, const CustomCVForce& force, ContextImpl& innerContext) {
+    int numCVs = force.getNumCollectiveVariables();
+    for (int i = 0; i < force.getNumGlobalParameters(); i++)
+        globalParameterNames.push_back(force.getGlobalParameterName(i));
+    for (int i = 0; i < numCVs; i++)
+        variableNames.push_back(force.getCollectiveVariableName(i));
+    for (int i = 0; i < force.getNumEnergyParameterDerivatives(); i++) {
+        string name = force.getEnergyParameterDerivativeName(i);
+        paramDerivNames.push_back(name);
+        cc.addEnergyParameterDerivative(name);
+    }
+
+    // Create custom functions for the tabulated functions.
+
+    map<string, Lepton::CustomFunction*> functions;
+    for (int i = 0; i < (int) force.getNumTabulatedFunctions(); i++)
+        functions[force.getTabulatedFunctionName(i)] = createReferenceTabulatedFunction(force.getTabulatedFunction(i));
+
+    // Create the expressions.
+
+    Lepton::ParsedExpression energyExpr = Lepton::Parser::parse(force.getEnergyFunction(), functions);
+    energyExpression = energyExpr.createProgram();
+    variableDerivExpressions.clear();
+    for (auto& name : variableNames)
+        variableDerivExpressions.push_back(energyExpr.differentiate(name).optimize().createProgram());
+    paramDerivExpressions.clear();
+    for (auto& name : paramDerivNames)
+        paramDerivExpressions.push_back(energyExpr.differentiate(name).optimize().createProgram());
+
+    // Delete the custom functions.
+
+    for (auto& function : functions)
+        delete function.second;
+
+    // Copy parameter derivatives from the inner context.
+
+    ComputeContext& cc2 = getInnerComputeContext(innerContext);
+    for (auto& param : cc2.getEnergyParamDerivNames())
+        cc.addEnergyParameterDerivative(param);
+    
+    // Create arrays for storing information.
+    
+    cvForces.resize(numCVs);
+    for (int i = 0; i < numCVs; i++)
+        cvForces[i].initialize<long long>(cc, 3*cc.getPaddedNumAtoms(), "cvForce");
+    invAtomOrder.initialize<int>(cc, cc.getPaddedNumAtoms(), "invAtomOrder");
+    innerInvAtomOrder.initialize<int>(cc, cc.getPaddedNumAtoms(), "innerInvAtomOrder");
+    
+    // Create the kernels.
+    
+    stringstream args, add;
+    for (int i = 0; i < numCVs; i++) {
+        args << ", GLOBAL mm_long * RESTRICT force" << i << ", real dEdV" << i;
+        add << "forces[i] += (mm_long) (force" << i << "[i]*dEdV" << i << ");\n";
+    }
+    map<string, string> replacements;
+    replacements["PARAMETER_ARGUMENTS"] = args.str();
+    replacements["ADD_FORCES"] = add.str();
+    ComputeProgram program = cc.compileProgram(cc.replaceStrings(CommonKernelSources::customCVForce, replacements));
+    copyStateKernel = program->createKernel("copyState");
+    copyStateKernel->addArg(cc.getPosq());
+    copyStateKernel->addArg(cc2.getPosq());
+    if (cc.getUseMixedPrecision()) {
+        copyStateKernel->addArg(cc.getPosqCorrection());
+        copyStateKernel->addArg(cc2.getPosqCorrection());
+    }
+    copyStateKernel->addArg(cc.getVelm());
+    copyStateKernel->addArg(cc2.getVelm());
+    copyStateKernel->addArg(cc.getAtomIndexArray());
+    copyStateKernel->addArg(innerInvAtomOrder);
+    copyStateKernel->addArg(cc.getNumAtoms());
+    copyForcesKernel = program->createKernel("copyForces");
+    copyForcesKernel->addArg();
+    copyForcesKernel->addArg(invAtomOrder);
+    copyForcesKernel->addArg(cc2.getLongForceBuffer());
+    copyForcesKernel->addArg(cc2.getAtomIndexArray());
+    copyForcesKernel->addArg(cc.getNumAtoms());
+    copyForcesKernel->addArg(cc.getPaddedNumAtoms());
+    addForcesKernel = program->createKernel("addForces");
+    addForcesKernel->addArg(cc.getLongForceBuffer());
+    addForcesKernel->addArg(cc.getLongForceBuffer().getSize());
+    for (int i = 0; i < numCVs; i++) {
+        addForcesKernel->addArg();
+        addForcesKernel->addArg();
+    }
+
+    // This context needs to respect all forces in the inner context when reordering atoms.
+
+    for (auto* info : cc2.getForceInfos())
+        cc.addForce(new ForceInfo(*info));
+}
+
+double CommonCalcCustomCVForceKernel::execute(ContextImpl& context, ContextImpl& innerContext, bool includeForces, bool includeEnergy) {
+    copyState(context, innerContext);
+    int numCVs = variableNames.size();
+    int numAtoms = cc.getNumAtoms();
+    int paddedNumAtoms = cc.getPaddedNumAtoms();
+    vector<double> cvValues;
+    vector<map<string, double> > cvDerivs(numCVs);
+    for (int i = 0; i < numCVs; i++) {
+        cvValues.push_back(innerContext.calcForcesAndEnergy(true, true, 1<<i));
+        copyForcesKernel->setArg(0, cvForces[i]);
+        copyForcesKernel->execute(numAtoms);
+        innerContext.getEnergyParameterDerivatives(cvDerivs[i]);
+    }
+    
+    // Compute the energy and forces.
+    
+    map<string, double> variables;
+    for (auto& name : globalParameterNames)
+        variables[name] = context.getParameter(name);
+    for (int i = 0; i < numCVs; i++)
+        variables[variableNames[i]] = cvValues[i];
+    double energy = energyExpression.evaluate(variables);
+    for (int i = 0; i < numCVs; i++) {
+        double dEdV = variableDerivExpressions[i].evaluate(variables);
+        addForcesKernel->setArg(2*i+2, cvForces[i]);
+        if (cc.getUseDoublePrecision())
+            addForcesKernel->setArg(2*i+3, dEdV);
+        else
+            addForcesKernel->setArg(2*i+3, (float) dEdV);
+    }
+    addForcesKernel->execute(numAtoms);
+    
+    // Compute the energy parameter derivatives.
+    
+    map<string, double>& energyParamDerivs = cc.getEnergyParamDerivWorkspace();
+    for (int i = 0; i < paramDerivExpressions.size(); i++)
+        energyParamDerivs[paramDerivNames[i]] += paramDerivExpressions[i].evaluate(variables);
+    for (int i = 0; i < numCVs; i++) {
+        double dEdV = variableDerivExpressions[i].evaluate(variables);
+        for (auto& deriv : cvDerivs[i])
+            energyParamDerivs[deriv.first] += dEdV*deriv.second;
+    }
+    return energy;
+}
+
+void CommonCalcCustomCVForceKernel::copyState(ContextImpl& context, ContextImpl& innerContext) {
+    int numAtoms = cc.getNumAtoms();
+    ComputeContext& cc2 = getInnerComputeContext(innerContext);
+    if (!hasInitializedListeners) {
+        hasInitializedListeners = true;
+        
+        // Initialize the listeners.
+        
+        ReorderListener* listener1 = new ReorderListener(cc, invAtomOrder);
+        ReorderListener* listener2 = new ReorderListener(cc2, innerInvAtomOrder);
+        cc.addReorderListener(listener1);
+        cc2.addReorderListener(listener2);
+        listener1->execute();
+        listener2->execute();
+    }
+    copyStateKernel->execute(numAtoms);
+    Vec3 a, b, c;
+    context.getPeriodicBoxVectors(a, b, c);
+    innerContext.setPeriodicBoxVectors(a, b, c);
+    innerContext.setTime(context.getTime());
+    map<string, double> innerParameters = innerContext.getParameters();
+    for (auto& param : innerParameters)
+        innerContext.setParameter(param.first, context.getParameter(param.first));
+}
+
+void CommonCalcCustomCVForceKernel::copyParametersToContext(ContextImpl& context, const CustomCVForce& force) {
+    // Create custom functions for the tabulated functions.
+
+    map<string, CustomFunction*> functions;
+    for (int i = 0; i < (int) force.getNumTabulatedFunctions(); i++)
+        functions[force.getTabulatedFunctionName(i)] = createReferenceTabulatedFunction(force.getTabulatedFunction(i));
+
+    // Replace tabulated functions in the expressions.
+
+    replaceFunctionsInExpression(functions, energyExpression);
+    for (auto& expression : variableDerivExpressions)
+        replaceFunctionsInExpression(functions, expression);
+    for (auto& expression : paramDerivExpressions)
+        replaceFunctionsInExpression(functions, expression);
+
+    // Delete the custom functions.
+
+    for (auto& function : functions)
+        delete function.second;
 }
 
 void CommonIntegrateVerletStepKernel::initialize(const System& system, const VerletIntegrator& integrator) {
@@ -7746,4 +7606,84 @@ void CommonApplyAndersenThermostatKernel::execute(ContextImpl& context) {
         kernel->setArg(4, (float) stepSize);
     kernel->setArg(6, cc.getIntegrationUtilities().prepareRandomNumbers(cc.getPaddedNumAtoms()));
     kernel->execute(cc.getNumAtoms());
+}
+
+void CommonApplyMonteCarloBarostatKernel::initialize(const System& system, const Force& thermostat) {
+    savedPositions.initialize(cc, cc.getPaddedNumAtoms(), cc.getUseDoublePrecision() ? sizeof(mm_double4) : sizeof(mm_float4), "savedPositions");
+    savedLongForces.initialize<long long>(cc, cc.getPaddedNumAtoms()*3, "savedLongForces");
+    try {
+        cc.getFloatForceBuffer(); // This will throw an exception on the CUDA platform.
+        savedFloatForces.initialize(cc, cc.getPaddedNumAtoms(), cc.getUseDoublePrecision() ? sizeof(mm_double4) : sizeof(mm_float4), "savedForces");
+    }
+    catch (...) {
+        // The CUDA platform doesn't have a floating point force buffer, so we don't need to copy it.
+    }
+    ComputeProgram program = cc.compileProgram(CommonKernelSources::monteCarloBarostat);
+    kernel = program->createKernel("scalePositions");
+}
+
+void CommonApplyMonteCarloBarostatKernel::scaleCoordinates(ContextImpl& context, double scaleX, double scaleY, double scaleZ) {
+    if (!hasInitializedKernels) {
+        hasInitializedKernels = true;
+
+        // Create the arrays with the molecule definitions.
+
+        vector<vector<int> > molecules = context.getMolecules();
+        numMolecules = molecules.size();
+        moleculeAtoms.initialize<int>(cc, cc.getNumAtoms(), "moleculeAtoms");
+        moleculeStartIndex.initialize<int>(cc, numMolecules+1, "moleculeStartIndex");
+        vector<int> atoms(moleculeAtoms.getSize());
+        vector<int> startIndex(moleculeStartIndex.getSize());
+        int index = 0;
+        for (int i = 0; i < numMolecules; i++) {
+            startIndex[i] = index;
+            for (int molecule : molecules[i])
+                atoms[index++] = molecule;
+        }
+        startIndex[numMolecules] = index;
+        moleculeAtoms.upload(atoms);
+        moleculeStartIndex.upload(startIndex);
+
+        // Initialize the kernel arguments.
+
+//KERNEL void scalePositions(float scaleX, float scaleY, float scaleZ, int numMolecules, real4 periodicBoxSize,
+//        real4 invPeriodicBoxSize, real4 periodicBoxVecX, real4 periodicBoxVecY, real4 periodicBoxVecZ, GLOBAL real4* RESTRICT posq,
+//        GLOBAL const int* RESTRICT moleculeAtoms, GLOBAL const int* RESTRICT moleculeStartIndex) {
+        
+        kernel->addArg();
+        kernel->addArg();
+        kernel->addArg();
+        kernel->addArg(numMolecules);
+        for (int i = 0; i < 5; i++)
+            kernel->addArg();
+        kernel->addArg(cc.getPosq());
+        kernel->addArg(moleculeAtoms);
+        kernel->addArg(moleculeStartIndex);
+    }
+    cc.getPosq().copyTo(savedPositions);
+    cc.getLongForceBuffer().copyTo(savedLongForces);
+    if (savedFloatForces.isInitialized())
+        cc.getFloatForceBuffer().copyTo(savedFloatForces);
+//    int bytesToCopy = cc.getPosq().getSize()*(cc.getUseDoublePrecision() ? sizeof(mm_double4) : sizeof(mm_float4));
+//    cc.getQueue().enqueueCopyBuffer(cc.getPosq().getDeviceBuffer(), savedPositions.getDeviceBuffer(), 0, 0, bytesToCopy);
+//    cc.getQueue().enqueueCopyBuffer(cc.getForce().getDeviceBuffer(), savedForces.getDeviceBuffer(), 0, 0, bytesToCopy);
+    kernel->setArg(0, (float) scaleX);
+    kernel->setArg(1, (float) scaleY);
+    kernel->setArg(2, (float) scaleZ);
+    setPeriodicBoxArgs(cc, kernel, 4);
+    kernel->execute(cc.getNumAtoms());
+    for (auto& offset : cc.getPosCellOffsets())
+        offset = mm_int4(0, 0, 0, 0);
+    lastAtomOrder = cc.getAtomIndex();
+}
+
+void CommonApplyMonteCarloBarostatKernel::restoreCoordinates(ContextImpl& context) {
+    savedPositions.copyTo(cc.getPosq());
+    savedLongForces.copyTo(cc.getLongForceBuffer());
+    if (savedFloatForces.isInitialized())
+        savedFloatForces.copyTo(cc.getFloatForceBuffer());
+
+//    int bytesToCopy = cc.getPosq().getSize()*(cc.getUseDoublePrecision() ? sizeof(mm_double4) : sizeof(mm_float4));
+//    cc.getQueue().enqueueCopyBuffer(savedPositions.getDeviceBuffer(), cc.getPosq().getDeviceBuffer(), 0, 0, bytesToCopy);
+//    cc.getQueue().enqueueCopyBuffer(savedForces.getDeviceBuffer(), cc.getForce().getDeviceBuffer(), 0, 0, bytesToCopy);
 }

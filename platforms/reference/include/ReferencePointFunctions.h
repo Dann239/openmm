@@ -1,16 +1,16 @@
-#ifndef OPENMM_AMOEBA_OUT_OF_PLANE_BEND_FORCE_IMPL_H_
-#define OPENMM_AMOEBA_OUT_OF_PLANE_BEND_FORCE_IMPL_H_
+#ifndef OPENMM_REFERENCEPOINTFUNCTIONS_H_
+#define OPENMM_REFERENCEPOINTFUNCTIONS_H_
 
 /* -------------------------------------------------------------------------- *
- *                                OpenMMAmoeba                                *
+ *                                   OpenMM                                   *
  * -------------------------------------------------------------------------- *
  * This is part of the OpenMM molecular simulation toolkit originating from   *
  * Simbios, the NIH National Center for Physics-Based Simulation of           *
  * Biological Structures at Stanford, funded under the NIH Roadmap for        *
  * Medical Research, grant U54 GM072970. See https://simtk.org.               *
  *                                                                            *
- * Portions copyright (c) 2008 Stanford University and the Authors.           *
- * Authors:                                                                   *
+ * Portions copyright (c) 2021 Stanford University and the Authors.           *
+ * Authors: Peter Eastman                                                     *
  * Contributors:                                                              *
  *                                                                            *
  * Permission is hereby granted, free of charge, to any person obtaining a    *
@@ -32,41 +32,57 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.                                     *
  * -------------------------------------------------------------------------- */
 
-#include "openmm/internal/ForceImpl.h"
-#include "openmm/AmoebaOutOfPlaneBendForce.h"
-#include "openmm/Kernel.h"
-#include <utility>
-#include <set>
-#include <string>
+#include "openmm/Vec3.h"
+#include "openmm/internal/windowsExport.h"
+#include "lepton/CustomFunction.h"
 
 namespace OpenMM {
 
 /**
- * This is the internal implementation of AmoebaOutOfPlaneBendForce.
+ * This implements the pointdistance() function used in custom forces.
  */
-
-class AmoebaOutOfPlaneBendForceImpl : public ForceImpl {
+class OPENMM_EXPORT ReferencePointDistanceFunction : public Lepton::CustomFunction {
 public:
-    AmoebaOutOfPlaneBendForceImpl(const AmoebaOutOfPlaneBendForce& owner);
-    ~AmoebaOutOfPlaneBendForceImpl();
-    void initialize(ContextImpl& context);
-    const AmoebaOutOfPlaneBendForce& getOwner() const {
-        return owner;
-    }
-    void updateContextState(ContextImpl& context, bool& forcesInvalid) {
-        // This force field doesn't update the state directly.
-    }
-    double calcForcesAndEnergy(ContextImpl& context, bool includeForces, bool includeEnergy, int groups);
-    std::map<std::string, double> getDefaultParameters() {
-        return std::map<std::string, double>(); // This force field doesn't define any parameters.
-    }
-    std::vector<std::string> getKernelNames();
-    void updateParametersInContext(ContextImpl& context);
+    ReferencePointDistanceFunction(bool periodic, Vec3** boxVectorHandle);
+    int getNumArguments() const;
+    double evaluate(const double* arguments) const;
+    double evaluateDerivative(const double* arguments, const int* derivOrder) const;
+    Lepton::CustomFunction* clone() const;
 private:
-    const AmoebaOutOfPlaneBendForce& owner;
-    Kernel kernel;
+    bool periodic;
+    Vec3** boxVectorHandle;
+};
+
+/**
+ * This implements the pointangle() function used in custom forces.
+ */
+class OPENMM_EXPORT ReferencePointAngleFunction : public Lepton::CustomFunction {
+public:
+    ReferencePointAngleFunction(bool periodic, Vec3** boxVectorHandle);
+    int getNumArguments() const;
+    double evaluate(const double* arguments) const;
+    double evaluateDerivative(const double* arguments, const int* derivOrder) const;
+    Lepton::CustomFunction* clone() const;
+private:
+    bool periodic;
+    Vec3** boxVectorHandle;
+};
+
+/**
+ * This implements the pointdihedral() function used in custom forces.
+ */
+class OPENMM_EXPORT ReferencePointDihedralFunction : public Lepton::CustomFunction {
+public:
+    ReferencePointDihedralFunction(bool periodic, Vec3** boxVectorHandle);
+    int getNumArguments() const;
+    double evaluate(const double* arguments) const;
+    double evaluateDerivative(const double* arguments, const int* derivOrder) const;
+    Lepton::CustomFunction* clone() const;
+private:
+    bool periodic;
+    Vec3** boxVectorHandle;
 };
 
 } // namespace OpenMM
 
-#endif /*OPENMM_AMOEBA_OUT_OF_PLANE_BEND_FORCE_IMPL_H_*/
+#endif /*OPENMM_REFERENCEPOINTFUNCTIONS_H_*/
