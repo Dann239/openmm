@@ -1,12 +1,20 @@
 //Author: Daniil Pavlov
 
 #include "CudaDomainDecomposition.h"
-#include "CudaKernelSources.h"
 
 #include <algorithm>
 
 using namespace OpenMM;
 using namespace std;
+
+
+template<typename TBase, typename TMethod, typename ...Args>
+void forEachKernel(CudaPlatform::PlatformData& data, TBase* caller, TMethod method, Args ...args) {
+    for(int i = 0; i < data.contexts.size(); i++) {
+        data.contexts[i]->setAsCurrent();
+        (caller->getKernel(i).*method)(args...);
+    }
+}
 
 CudaDDInterface::CudaDDInterface(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) : name(name), platform(platform), data(data) {
     data.ddutilities->registerKernel(this);
@@ -25,7 +33,7 @@ void CudaDDInterface::prepareKernels() {
         throw OpenMMException("Kernel array in CudaDDInterface has an invalid size!");
     for (int i = 0; i < data.contexts.size(); i++) {
         KernelImpl* kernel = nullptr;
-        const System& system = data.ddutilities->getSubsystem(i);
+        const System& system = data.ddutilities->system;
         CudaContext& cu = *data.contexts[i];
 
         if (name == CalcForcesAndEnergyKernel::Name()) {
@@ -33,7 +41,11 @@ void CudaDDInterface::prepareKernels() {
             newKernel->initialize(system);
             kernel = newKernel;
         }
-        // CudaDDUpdateStateData doesn't implement CudaDDInterface because reasons
+        if (name == UpdateStateDataKernel::Name()) {
+            auto newKernel = new CudaUpdateStateDataKernel(name, platform, cu);
+            newKernel->initialize(system);
+            kernel = newKernel;
+        }
         if (name == ApplyConstraintsKernel::Name()) {
             auto newKernel = new CommonApplyConstraintsKernel(name, platform, cu);
             newKernel->initialize(system);
@@ -57,7 +69,7 @@ void CudaDDInterface::prepareKernels() {
 
 
 CudaDDUtilities::CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl) :
-    data(data), system(system), updater(nullptr), time(0) {
+    data(data), system(system), contextImpl(contextImpl), updater(nullptr), time(0), cutoff(0) {
 
     numAtoms = system.getNumParticles();
     paddedNumAtoms = (numAtoms + 31)/32*32;
@@ -74,22 +86,6 @@ CudaDDUtilities::CudaDDUtilities(CudaPlatform::PlatformData& data, const System&
     for (int i = 0; i < molecules.size(); i++)
         for (int j : molecules[i])
             moleculeInd[j] = i;
-}
-
-const System& CudaDDUtilities::getSubsystem(int ind) {
-    if(ind >= data.devices.size() || ind < 0)
-        throw OpenMMException("Invalid subsystem index!");
-    // Possibly, we could create smaller subsystems, but then we'd also have to spoof all Force objects.
-    /*
-    if (positions.size() == 0)
-        throw OpenMMException("Domain decomposition cannot be performed, particle positions have not been set!");
-    if (subsystems.size() == 0) {
-        subsystems.resize(data.devices.size());
-        //TODO domain decomposition
-    }
-    return subsystems[ind];
-    */
-    return system;
 }
 
 void CudaDDUtilities::registerKernel(CudaDDInterface* kernel) {
@@ -109,7 +105,6 @@ void CudaDDUtilities::prepareContexts() {
         throw OpenMMException("CudaContext array in CudaPlatform::PlatformData has an invalid size!");
     for (int i = 0; i < data.devices.size(); i++) {
         if (data.devices[i].length() > 0) {
-            const System& system = getSubsystem(i);
             int deviceIndex = stoi(data.devices[i]);
             bool blocking = (data.propertyValues[CudaPlatform::CudaUseBlockingSync()] == "true");
             const string& precisionProperty = data.propertyValues[CudaPlatform::CudaPrecision()];
@@ -120,9 +115,13 @@ void CudaDDUtilities::prepareContexts() {
             data.contexts.push_back(new CudaContext(system, deviceIndex, blocking, precisionProperty, compilerProperty, tempProperty, hostCompilerProperty, allowRuntimeCompiler, data, nullptr));
         }
     }
-    decompose(data.contexts[0]->getNonbondedUtilities().getMaxCutoffDistance());
     for(int i = 0; i < registeredKernels.size(); i++)
         registeredKernels[i]->prepareKernels();
+    decompose();
+    updater->setPositions(contextImpl, positions);
+    updater->setVelocities(contextImpl, velocities);
+    updater->setPeriodicBoxVectors(contextImpl, box[0], box[1], box[2]);
+    updater->setTime(contextImpl, time);
 }
 
 void CudaDDUtilities::destroyContexts() {
@@ -132,11 +131,12 @@ void CudaDDUtilities::destroyContexts() {
         delete data.contexts[i];
 }
 
-void CudaDDUtilities::decompose(double cutoff) {
+void CudaDDUtilities::decompose() {
     if (positions.size() == 0)
         throw OpenMMException("Domain decomposition cannot be performed, particle positions have not been set!");
     // For now, we just split along the z-axis and do no load-balancing whatsoever
     // TODO enhance the algorithm
+    resetCutoff();
     for(int i = 0; i < data.devices.size(); i++) {
         domains.emplace_back(Domain{
             0., box[0][0] + box[1][0] + box[2][0],
@@ -179,22 +179,34 @@ void CudaDDUtilities::decompose(double cutoff) {
             }
         }
         if(domainInd[i] == -1)
-            throw OpenMMException("Partice " + to_string(i) + " was not assigned to a domain.");
+            throw OpenMMException("Particle " + to_string(i) + " was not assigned to a domain.");
     }
+    // TODO save into CudaNonbondedUtilities
+}
+
+void CudaDDUtilities::resetCutoff() {
+    cutoff = data.contexts[0]->getNonbondedUtilities().getMaxCutoffDistance();
+}
+
+double CudaDDUtilities::getCutoff() {
+    return cutoff;
 }
 
 
 void CudaDDCalcForcesAndEnergyKernel::beginComputation(ContextImpl& context, bool includeForces, bool includeEnergy, int groups) {
-    for (int i = 0; i < data.contexts.size(); i++)
-        getKernel(i).beginComputation(context, includeForces, includeEnergy, groups);
+    forEachKernel(data, this, &CalcForcesAndEnergyKernel::beginComputation, context, includeForces, includeEnergy, groups);
 }
 
 double CudaDDCalcForcesAndEnergyKernel::finishComputation(ContextImpl& context, bool includeForces, bool includeEnergy, int groups, bool& valid) {
-    for (int i = 0; i < data.contexts.size(); i++)
-        getKernel(i).finishComputation(context, includeForces, includeEnergy, groups, valid);
+    forEachKernel(data, this, &CalcForcesAndEnergyKernel::finishComputation, context, includeForces, includeEnergy, groups, valid);
     //TODO gather energy
 }
 
+
+CudaDDUpdateStateDataKernel::CudaDDUpdateStateDataKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
+    UpdateStateDataKernel(name, platform), data(data), CudaDDInterface(name, platform, data) {
+    data.ddutilities->registerUpdater(this);
+}
 
 double CudaDDUpdateStateDataKernel::getTime(const ContextImpl& context) const {
     return data.ddutilities->time;
@@ -212,8 +224,14 @@ void CudaDDUpdateStateDataKernel::getPositions(ContextImpl& context, vector<Vec3
 
 void CudaDDUpdateStateDataKernel::setPositions(ContextImpl& context, const vector<Vec3>& positions) {
     data.ddutilities->positions = positions;
-    data.ddutilities->prepareContexts();
-    //TODO spread over domains
+    if(data.contexts.size() == 0) {
+        data.ddutilities->prepareContexts();
+        return;
+    }
+    else {
+        data.ddutilities->decompose();
+    }
+    forEachKernel(data, this, &UpdateStateDataKernel::setPositions, context, positions);
 }
 
 void CudaDDUpdateStateDataKernel::getVelocities(ContextImpl& context, vector<Vec3>& velocities) {
@@ -222,9 +240,7 @@ void CudaDDUpdateStateDataKernel::getVelocities(ContextImpl& context, vector<Vec
 
 void CudaDDUpdateStateDataKernel::setVelocities(ContextImpl& context, const vector<Vec3>& velocities) {
     data.ddutilities->velocities = velocities;
-    if(data.contexts.size() == 0)
-        return;
-    //TODO spread over domains
+    forEachKernel(data, this, &UpdateStateDataKernel::setVelocities, context, velocities);
 }
 
 void CudaDDUpdateStateDataKernel::getForces(ContextImpl& context, vector<Vec3>& forces) {
@@ -278,31 +294,29 @@ void CudaDDUpdateStateDataKernel::loadCheckpoint(ContextImpl& context, istream& 
 
 
 void CudaDDApplyConstraintsKernel::apply(ContextImpl& context, double tol) {
-    for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).apply(context, tol);
+    forEachKernel(data, this, &ApplyConstraintsKernel::apply, context, tol);
 }
 
 void CudaDDApplyConstraintsKernel::applyToVelocities(ContextImpl& context, double tol) {
-    for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).applyToVelocities(context, tol);
+    forEachKernel(data, this, &ApplyConstraintsKernel::applyToVelocities, context, tol);
 }
 
 
 void CudaDDVirtualSitesKernel::computePositions(ContextImpl& context) {
-    for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).computePositions(context);
+    forEachKernel(data, this, &VirtualSitesKernel::computePositions, context);
 }
 
 
 double CudaDDCalcNonbondedForceKernel::execute(ContextImpl& context, bool includeForces, bool includeEnergy, bool includeDirect, bool includeReciprocal) {
-    for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).execute(context, includeForces, includeEnergy, includeDirect, includeReciprocal);
+    forEachKernel(data, this, &CalcNonbondedForceKernel::execute, context, includeForces, includeEnergy, includeDirect, includeReciprocal);
 }
 
 void CudaDDCalcNonbondedForceKernel::copyParametersToContext(ContextImpl& context, const NonbondedForce& force) {
-    //TODO spread over domains
-    for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).copyParametersToContext(context, force);
+    double oldCutoff = data.ddutilities->getCutoff();
+    forEachKernel(data, this, &CalcNonbondedForceKernel::copyParametersToContext, context, force);
+    data.ddutilities->resetCutoff();
+    if(oldCutoff != data.ddutilities->getCutoff())
+        data.ddutilities->decompose();
 }
 
 void CudaDDCalcNonbondedForceKernel::getPMEParameters(double& alpha, int& nx, int& ny, int& nz) const {
@@ -324,15 +338,12 @@ void CudaDDCalcNonbondedForceKernel::prepareKernels() {
         throw OpenMMException("Ewald summation for domain decomposition is not implemented yet.");
     if (nonbondedMethod == PME || nonbondedMethod == LJPME)
         throw OpenMMException("PME for domain decomposition is not implemented yet.");
-    //TODO spread over domains
-    for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).initialize(data.ddutilities->getSubsystem(i), *storedForce);
+    forEachKernel(data, this, &CalcNonbondedForceKernel::initialize, data.ddutilities->system, *storedForce);
 }
 
 
 void CudaDDIntegrateVerletStepKernel::execute(ContextImpl& context, const VerletIntegrator& integrator) {
-    for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).execute(context, integrator);
+    forEachKernel(data, this, &IntegrateVerletStepKernel::execute, context, integrator);
     //TODO halo exchange
 }
 
@@ -344,6 +355,5 @@ void CudaDDIntegrateVerletStepKernel::prepareKernels() {
     CudaDDInterface::prepareKernels();
     if (!storedIntegrator)
         throw OpenMMException("Integrator hasn't been initialized!");
-    for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).initialize(data.ddutilities->getSubsystem(i), *storedIntegrator);
+    forEachKernel(data, this, &IntegrateVerletStepKernel::initialize, data.ddutilities->system, *storedIntegrator);
 }

@@ -44,16 +44,9 @@ class OPENMM_EXPORT_COMMON CudaDDUtilities {
     friend class CudaDDUpdateStateDataKernel;
 public:
     struct Domain {
-        double xhi, xlo, yhi, ylo, zhi, zlo;
+        double xlo, xhi, ylo, yhi, zlo, zhi;
     };
     CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl);
-    /**
-     * Get one of the subsystems that the system was decomposed into.
-     * 
-     * @param ind the index of the subsystem
-     * @return a vector of subsystems that the system was decomposed into.
-     */
-    const System& getSubsystem(int ind);
     /**
      * Register a kernel via CudaDDInterface.
      * 
@@ -77,10 +70,16 @@ public:
     void destroyContexts();
     /**
      * Perform the domain decomposition.
-     * 
-     * @param cutoff maximum cutoff of all nonbonded forces
      */
-    void decompose(double cutoff);
+    void decompose();
+    /**
+     * This should be called whenever cutoff of a force changes or might have changed.
+     */
+    void resetCutoff();
+    /**
+     * Get the maximum cutoff distance used by any force group.
+     */
+    double getCutoff();
 private:
     int numAtoms, paddedNumAtoms;
 
@@ -95,12 +94,14 @@ private:
     Vec3 box[3];
     double time;
 
+    double cutoff;
     std::vector<std::vector<unsigned int> > domainMasks;
     std::vector<std::vector<unsigned int> > enabledMasks;
     std::vector<Domain> domains;
     std::vector<int> domainInd;
 public:
     const System& system;
+    ContextImpl& contextImpl;
 };
 
 /**
@@ -155,10 +156,11 @@ public:
  * This kernel provides methods for setting and retrieving various state data: time, positions,
  * velocities, and forces. Unlike other DD classes, this one doesn't implement CudaDDInterface.
  */
-class CudaDDUpdateStateDataKernel : public UpdateStateDataKernel {
+class CudaDDUpdateStateDataKernel : public UpdateStateDataKernel, public CudaDDInterface {
 public:
-    CudaDDUpdateStateDataKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data) :
-        UpdateStateDataKernel(name, platform), data(data) {
+    CudaDDUpdateStateDataKernel(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
+    CudaUpdateStateDataKernel& getKernel(int i) {
+        return kernels[i].getAs<CudaUpdateStateDataKernel>();
     }
     /**
      * Initialize the kernel.
