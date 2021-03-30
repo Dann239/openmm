@@ -3,6 +3,8 @@
 #include "CudaDomainDecomposition.h"
 #include "CudaKernelSources.h"
 
+#include <algorithm>
+
 using namespace OpenMM;
 using namespace std;
 
@@ -23,7 +25,7 @@ void CudaDDInterface::prepareKernels() {
         throw OpenMMException("Kernel array in CudaDDInterface has an invalid size!");
     for (int i = 0; i < data.contexts.size(); i++) {
         KernelImpl* kernel = nullptr;
-        const System& system = data.ddutilities->getSubsystems()[i];
+        const System& system = data.ddutilities->getSubsystem(i);
         CudaContext& cu = *data.contexts[i];
 
         if (name == CalcForcesAndEnergyKernel::Name()) {
@@ -57,24 +59,37 @@ void CudaDDInterface::prepareKernels() {
 CudaDDUtilities::CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl) :
     data(data), system(system), updater(nullptr), time(0) {
 
+    numAtoms = system.getNumParticles();
+    paddedNumAtoms = (numAtoms + 31)/32*32;
+
+    domainMasks.resize(data.devices.size(), vector<unsigned int>(paddedNumAtoms / 32));
+    enabledMasks.resize(data.devices.size(), vector<unsigned int>(paddedNumAtoms / 32));
+    domainInd.resize(numAtoms, -1);
+
     system.getDefaultPeriodicBoxVectors(box[0], box[1], box[2]);
 
     molecules = contextImpl.getMolecules();
-    moleculeInd.resize(system.getNumParticles());
+    moleculeInd.resize(numAtoms);
 
     for (int i = 0; i < molecules.size(); i++)
         for (int j : molecules[i])
             moleculeInd[j] = i;
 }
 
-const vector<System>& CudaDDUtilities::getSubsystems() {
+const System& CudaDDUtilities::getSubsystem(int ind) {
+    if(ind >= data.devices.size() || ind < 0)
+        throw OpenMMException("Invalid subsystem index!");
+    // Possibly, we could create smaller subsystems, but then we'd also have to spoof all Force objects.
+    /*
     if (positions.size() == 0)
         throw OpenMMException("Domain decomposition cannot be performed, particle positions have not been set!");
     if (subsystems.size() == 0) {
         subsystems.resize(data.devices.size());
         //TODO domain decomposition
     }
-    return subsystems;
+    return subsystems[ind];
+    */
+    return system;
 }
 
 void CudaDDUtilities::registerKernel(CudaDDInterface* kernel) {
@@ -94,7 +109,7 @@ void CudaDDUtilities::prepareContexts() {
         throw OpenMMException("CudaContext array in CudaPlatform::PlatformData has an invalid size!");
     for (int i = 0; i < data.devices.size(); i++) {
         if (data.devices[i].length() > 0) {
-            const System& system = getSubsystems()[i];
+            const System& system = getSubsystem(i);
             int deviceIndex = stoi(data.devices[i]);
             bool blocking = (data.propertyValues[CudaPlatform::CudaUseBlockingSync()] == "true");
             const string& precisionProperty = data.propertyValues[CudaPlatform::CudaPrecision()];
@@ -105,6 +120,7 @@ void CudaDDUtilities::prepareContexts() {
             data.contexts.push_back(new CudaContext(system, deviceIndex, blocking, precisionProperty, compilerProperty, tempProperty, hostCompilerProperty, allowRuntimeCompiler, data, nullptr));
         }
     }
+    decompose(data.contexts[0]->getNonbondedUtilities().getMaxCutoffDistance());
     for(int i = 0; i < registeredKernels.size(); i++)
         registeredKernels[i]->prepareKernels();
 }
@@ -114,6 +130,57 @@ void CudaDDUtilities::destroyContexts() {
         registeredKernels[i]->destroyKernels();
     for (int i = 0; i < data.contexts.size(); i++)
         delete data.contexts[i];
+}
+
+void CudaDDUtilities::decompose(double cutoff) {
+    if (positions.size() == 0)
+        throw OpenMMException("Domain decomposition cannot be performed, particle positions have not been set!");
+    // For now, we just split along the z-axis and do no load-balancing whatsoever
+    // TODO enhance the algorithm
+    for(int i = 0; i < data.devices.size(); i++) {
+        domains.emplace_back(Domain{
+            0., box[0][0] + box[1][0] + box[2][0],
+            0., box[1][1] + box[2][1],
+            box[2][2] / data.devices.size() * i, box[2][2] / data.devices.size() * (i + 1)
+        });
+    }
+    fill(domainInd.begin(), domainInd.end(), -1);
+    for(int i = 0; i < data.devices.size(); i++) {
+        fill(domainMasks[i].begin(), domainMasks[i].end(), 0);
+        fill(enabledMasks[i].begin(), enabledMasks[i].end(), 0);
+    }
+    for(int i = 0; i < numAtoms; i++) {
+        Vec3 pos = positions[i];
+        double scale3 = floor(pos[2] / box[2][2]);
+        pos[0] -= scale3*box[2][0];
+        pos[1] -= scale3*box[2][1];
+        pos[2] -= scale3*box[2][2];
+        double scale2 = floor(pos[1] / box[1][1]);
+        pos[0] -= scale2*box[1][0];
+        pos[1] -= scale2*box[1][1];
+        double scale1 = floor(pos[0] / box[0][0]);
+        pos[0] -= scale1*box[0][0];
+
+        auto& molecule = molecules[moleculeInd[i]];
+        for(int j = 0; j < domains.size(); j++) {
+            if( pos[0] > domains[j].xlo && pos[0] <= domains[j].xhi &&
+                pos[1] > domains[j].ylo && pos[1] <= domains[j].yhi &&
+                pos[2] > domains[j].zlo && pos[2] <= domains[j].zhi
+              ) {
+                domainMasks[j][i / 32] |= 1 << (i % 32);
+                domainInd[i] = j;
+            }
+            if( pos[0] >= domains[j].xlo - cutoff && pos[0] <= domains[j].xhi + cutoff &&
+                pos[1] >= domains[j].ylo - cutoff && pos[1] <= domains[j].yhi + cutoff &&
+                pos[2] >= domains[j].zlo - cutoff && pos[2] <= domains[j].zhi + cutoff
+              ) {
+                for(int k = 0; k < molecule.size(); k++)
+                    enabledMasks[j][molecule[k] / 32] |= 1 << (molecule[k] % 32);
+            }
+        }
+        if(domainInd[i] == -1)
+            throw OpenMMException("Partice " + to_string(i) + " was not assigned to a domain.");
+    }
 }
 
 
@@ -259,7 +326,7 @@ void CudaDDCalcNonbondedForceKernel::prepareKernels() {
         throw OpenMMException("PME for domain decomposition is not implemented yet.");
     //TODO spread over domains
     for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).initialize(data.ddutilities->getSubsystems()[i], *storedForce);
+        getKernel(i).initialize(data.ddutilities->getSubsystem(i), *storedForce);
 }
 
 
@@ -278,5 +345,5 @@ void CudaDDIntegrateVerletStepKernel::prepareKernels() {
     if (!storedIntegrator)
         throw OpenMMException("Integrator hasn't been initialized!");
     for (int i = 0; i < kernels.size(); i++)
-        getKernel(i).initialize(data.ddutilities->getSubsystems()[i], *storedIntegrator);
+        getKernel(i).initialize(data.ddutilities->getSubsystem(i), *storedIntegrator);
 }

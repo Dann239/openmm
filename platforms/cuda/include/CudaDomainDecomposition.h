@@ -43,13 +43,17 @@ class CudaDDUpdateStateDataKernel;
 class OPENMM_EXPORT_COMMON CudaDDUtilities {
     friend class CudaDDUpdateStateDataKernel;
 public:
+    struct Domain {
+        double xhi, xlo, yhi, ylo, zhi, zlo;
+    };
     CudaDDUtilities(CudaPlatform::PlatformData& data, const System& system, ContextImpl& contextImpl);
     /**
-     * Get the subsystems that the system was decomposed into.
+     * Get one of the subsystems that the system was decomposed into.
      * 
+     * @param ind the index of the subsystem
      * @return a vector of subsystems that the system was decomposed into.
      */
-    const std::vector<System>& getSubsystems();
+    const System& getSubsystem(int ind);
     /**
      * Register a kernel via CudaDDInterface.
      * 
@@ -71,11 +75,18 @@ public:
      * Destroys all CudaContexts. PlatformData holds ownership over contexts so this needn't be called on destruction.
      */
     void destroyContexts();
+    /**
+     * Perform the domain decomposition.
+     * 
+     * @param cutoff maximum cutoff of all nonbonded forces
+     */
+    void decompose(double cutoff);
 private:
+    int numAtoms, paddedNumAtoms;
+
     CudaPlatform::PlatformData& data;
     std::vector<std::vector<int> > molecules;
     std::vector<int> moleculeInd;
-    std::vector<System> subsystems;
     std::vector<CudaDDInterface*> registeredKernels;
     CudaDDUpdateStateDataKernel* updater;
 
@@ -83,6 +94,11 @@ private:
     std::vector<Vec3> velocities;
     Vec3 box[3];
     double time;
+
+    std::vector<std::vector<unsigned int> > domainMasks;
+    std::vector<std::vector<unsigned int> > enabledMasks;
+    std::vector<Domain> domains;
+    std::vector<int> domainInd;
 public:
     const System& system;
 };
