@@ -465,6 +465,10 @@ void CudaContext::initialize() {
             energyParamDerivBuffer.initialize<float>(*this, numEnergyParamDerivs*numEnergyBuffers, "energyParamDerivBuffer");
         addAutoclearBuffer(energyParamDerivBuffer);
     }
+    if(getPlatformData().domainDecomposition) {
+        domainMask.initialize<unsigned int>(*this, paddedNumAtoms/32, "domainMask");
+        enabledMask.initialize<unsigned int>(*this, paddedNumAtoms/32, "enabledMask");
+    }
     findMoleculeGroups();
     nonbonded->initialize(system);
 }

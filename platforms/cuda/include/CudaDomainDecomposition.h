@@ -20,7 +20,7 @@ class CudaDDInterface {
 public:
     CudaDDInterface(std::string name, const Platform& platform, CudaPlatform::PlatformData& data);
     /**
-     * Destroys all the kernels to prepare for contexts destruction.
+     * Destroys all the kernels to prepare for contexts' destruction.
      */
     virtual void destroyKernels();
     /**
@@ -79,7 +79,21 @@ public:
     /**
      * Get the maximum cutoff distance used by any force group.
      */
-    double getCutoff();
+    double getCutoff() const {
+        return cutoff;
+    }
+    /**
+     * Get the domain masks: host-side indexed masks of atoms that belong to certain domains.
+     */
+    const std::vector<std::vector<unsigned int> >& getDomainMasks() const {
+        return domainMasks;
+    }
+    /**
+     * Get the masks of enabled atoms: host-side indexed masks of atoms that are within a cutoff distance to certain domains.
+     */
+    const std::vector<std::vector<unsigned int> >& getEnabledMasks() const {
+        return enabledMasks;
+    }
 private:
     int numAtoms, paddedNumAtoms;
 
@@ -154,7 +168,7 @@ public:
 
 /**
  * This kernel provides methods for setting and retrieving various state data: time, positions,
- * velocities, and forces. Unlike other DD classes, this one doesn't implement CudaDDInterface.
+ * velocities, and forces.
  */
 class CudaDDUpdateStateDataKernel : public UpdateStateDataKernel, public CudaDDInterface {
 public:

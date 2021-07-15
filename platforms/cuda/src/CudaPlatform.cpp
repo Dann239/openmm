@@ -262,7 +262,9 @@ CudaPlatform::PlatformData::PlatformData(ContextImpl* context, const System& sys
 
             ddutilities = new CudaDDUtilities(*this, system, *context);
             // Contexts generation is postponed until after the positions are set
-            // TODO make deviceIndex, deviceName, peerAccessSupported contain correct information
+            // TODO make deviceIndex, deviceName, peerAccessSupported, contextEnergy contain correct information
+            // TODO consider creating contexts regardless of domain decomposition
+            // TODO enable peer-to-peer on neighboring domains instead of one-to-all
         }
         else {
             ddutilities = nullptr;

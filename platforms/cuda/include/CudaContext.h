@@ -228,6 +228,20 @@ public:
         return energyParamDerivBuffer;
     }
     /**
+     * Get the array of masks of enabled atoms: device-side indexed masks of atoms
+     * that are within a cutoff distance to certain domains. Used for domain decomposition.
+     */
+    CudaArray& getEnabledMask() {
+        return enabledMask;
+    }
+    /**
+     * Get the domain masks: device-side indexed masks of atoms that
+     * belong to certain domains. Used for domain decomposition.
+     */
+    CudaArray& getDomainMask() {
+        return domainMask;
+    }
+    /**
      * Get a pointer to a block of pinned memory that can be used for efficient transfers between host and device.
      * This is guaranteed to be at least as large as any of the arrays returned by methods of this class.
      */
@@ -564,6 +578,8 @@ private:
     CudaArray energyParamDerivBuffer;
     CudaArray atomIndexDevice;
     CudaArray chargeBuffer;
+    CudaArray enabledMask;
+    CudaArray domainMask;
     std::vector<std::string> energyParamDerivNames;
     std::map<std::string, double> energyParamDerivWorkspace;
     std::vector<CUdeviceptr> autoclearBuffers;
