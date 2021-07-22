@@ -8,9 +8,9 @@ using namespace OpenMM;
 using namespace std;
 
 
-template<typename TBase, typename TMethod, typename ...Args>
-void forEachKernel(CudaPlatform::PlatformData& data, TBase* caller, TMethod method, Args& ...args) {
-    //TODO parallelize when needed
+template<typename TBase, typename TMethod, typename ...TArgs>
+void forEachKernel(CudaPlatform::PlatformData& data, TBase* caller, TMethod method, TArgs& ...args) {
+    //TODO parallelize this somehow
     for(int i = 0; i < data.contexts.size(); i++) {
         data.contexts[i]->setAsCurrent();
         (caller->getKernel(i).*method)(args...);
@@ -104,6 +104,8 @@ class CudaDDReorderListener : public ComputeContext::ReorderListener {
         CudaDDReorderListener(CudaContext& context) : context(context) {
         }
         void execute() {
+            //TODO parallelize this maybe?
+            //TODO make ThreadPool support asynchronous calls
             CudaDDUtilities& ddutilities = *context.getPlatformData().ddutilities;
             auto& atomIndices = context.getAtomIndex();
             auto& domainMask = ddutilities.getDomainMasks()[context.getContextIndex()];
@@ -285,9 +287,24 @@ void CudaDDUpdateStateDataKernel::setTime(ContextImpl& context, double time) {
     for (auto ctx : data.contexts)
         ctx->setTime(time);
 }
+template<typename TMethod>
+void CudaDDUpdateStateDataKernel::getter(ContextImpl& context, vector<Vec3>& dst, TMethod method) {
+    //TODO parallelize this too maybe?
+    for(int domainIndex = 0; domainIndex < data.contexts.size(); domainIndex++) {
+        CudaContext& cu = *data.contexts[domainIndex];
+        const vector<int>& domainIndices = data.ddutilities->getDomainInd();
+        const vector<int>& order = cu.getAtomIndex();
+        vector<Vec3> buff;
+        (getKernel(domainIndex).*method)(context, buff);
+        for(int i = 0; i < dst.size(); i++)
+            if(domainIndices[i] == domainIndex)
+                dst[i] = buff[i];
+    }
+}
 
 void CudaDDUpdateStateDataKernel::getPositions(ContextImpl& context, vector<Vec3>& positions) {
-    //TODO gather domains
+    getter(context, positions, &CudaUpdateStateDataKernel::getPositions);
+    data.ddutilities->positions = positions;
 }
 
 void CudaDDUpdateStateDataKernel::setPositions(ContextImpl& context, const vector<Vec3>& positions) {
@@ -303,7 +320,8 @@ void CudaDDUpdateStateDataKernel::setPositions(ContextImpl& context, const vecto
 }
 
 void CudaDDUpdateStateDataKernel::getVelocities(ContextImpl& context, vector<Vec3>& velocities) {
-    //TODO gather domains
+    getter(context, velocities, &CudaUpdateStateDataKernel::getVelocities);
+    data.ddutilities->velocities = velocities;
 }
 
 void CudaDDUpdateStateDataKernel::setVelocities(ContextImpl& context, const vector<Vec3>& velocities) {
@@ -312,7 +330,7 @@ void CudaDDUpdateStateDataKernel::setVelocities(ContextImpl& context, const vect
 }
 
 void CudaDDUpdateStateDataKernel::getForces(ContextImpl& context, vector<Vec3>& forces) {
-    //TODO gather domains
+    getter(context, forces, &CudaUpdateStateDataKernel::getForces);
 }
 
 void CudaDDUpdateStateDataKernel::getEnergyParameterDerivatives(ContextImpl& context, map<string, double>& derivs) {

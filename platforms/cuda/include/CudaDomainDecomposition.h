@@ -94,6 +94,12 @@ public:
     const std::vector<std::vector<unsigned int> >& getEnabledMasks() const {
         return enabledMasks;
     }
+    /**
+     * Get the vector of domain indices that particles belong to.
+     */
+    const std::vector<int>& getDomainInd() const {
+        return domainInd;
+    }
 private:
     int numAtoms, paddedNumAtoms;
 
@@ -261,6 +267,9 @@ public:
     void loadCheckpoint(ContextImpl& context, std::istream& stream);
 private:
     CudaPlatform::PlatformData& data;
+
+    template<typename TMethod>
+    void getter(ContextImpl& context, std::vector<Vec3>& dst, TMethod method);
 };
 
 
